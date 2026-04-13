@@ -1,0 +1,292 @@
+#This script contains all code to analyse squirrel monkey 16S data using QIIME2 (version)
+
+#!/bin/bash
+#SBATCH --account=b1057
+#SBATCH --partition=b1057
+#SBATCH --job-name=qiime_summaryinfo
+#SBATCH --output=qiime_summaryinfo.out
+#SBATCH --error=qiime_summaryinfo.err
+#SBATCH --time=10:00:00
+#SBATCH --mem=30G
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mail-user=sharmi.sen@northwestern.edu
+#SBATCH --mail-type=END
+
+module purge all
+module load qiime2/2024.5-amplicon
+
+##step1 of qiime analyses
+
+qiime tools import --input-path /path/to/saimiri_manifest_file_05142025.csv \
+  --output-path /path/to/saimiri_summary_Jan2026.qza  \
+  --type SampleData[PairedEndSequencesWithQuality] \
+  --input-format PairedEndFastqManifestPhred33
+
+echo "summarizing manifest file"
+
+##output qza from above should be passed to --i-data
+qiime demux summarize --i-data /path/to/saimiri_summary_Jan2026.qza \
+ --o-visualization /path/to/saimiri_summary_Jan2026.qzv
+
+## the next step is dada2
+
+#!/bin/bash
+#SBATCH --account=b1042
+#SBATCH --partition=genomics
+#SBATCH --job-name=dada2
+#SBATCH --output=dada2.out
+#SBATCH --error=dada2.err
+#SBATCH --time=10:00:00
+#SBATCH --mem=50G
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=6
+#SBATCH --mail-user=sharmi.sen@northwestern.edu
+#SBATCH --mail-type=END
+
+module purge all
+module load qiime2/2024.5-amplicon
+
+
+#qiime dada2 denoise-paired --i-demultiplexed-seqs saimiri_summary_Jan2026.qza \
+# --p-trim-left-f 20 --p-trim-left-r 21 --p-trunc-len-f 260 --p-trunc-len-r 210 \
+# --o-representative-sequences saimiri_rep_seqs_dada2.qza \
+# --o-table saimiri_table_dada2.qza \
+# --o-denoising-stats saimiri_stats_dada2.qza
+
+#filter biological samples
+#qiime feature-table filter-samples \
+# --i-table saimiri_table_dada2.qza \
+# --m-metadata-file dada2_part3_metadata.tsv \
+# --p-where "sample_type != 'control'" \
+# --o-filtered-table saimiri_table_dada2_no-controls.qza 
+
+#renaming 
+# cp saimiri_table_dada2.qza saimiri_table_dada2_all-samples.qza
+
+#filtering control features
+qiime feature-table filter-samples \
+  -i-table saimiri_table_dada2_all-samples.qza \
+  --m-metadata-file dada2_part3_metadata.tsv \
+  --p-where "sample_type = 'control'" \
+  --o-filtered-table saimiri_table_controls_only.qza
+
+#summarizing control features
+qiime feature-table summarize \
+  --i-table saimiri_table_controls_only.qza \
+  --o-visualization saimiri_control_feature_ids.qzv
+
+#exporting features for controls 
+qiime tools export \
+  --i-table saimiri_table_controls_only.qza \
+  --output-dir control_feature_ids
+
+#visualizing denoising stats
+qiime metadata tabulate --m-input-file saimiri_stats_dada2.qza \
+ --o-visualization saimiri_stats_dada2.qzv
+
+#visualizing feature seqs
+qiime feature-table tabulate-seqs --i-data saimiri_rep_seqs_dada2.qza \
+ --o-visualization saimiri_rep-seqs_dada2_Jan2026.qzv
+
+#summarising cleaned table and seqs
+qiime feature-table summarize \
+  --i-table saimiri_table_dada2_no-controls.qza \
+  --o-visualization saimiri_table_dada2_FINAL_CLEAN.qzv \
+  --m-sample-metadata-file dada2_part3_metadata.tsv
+
+qiime feature-table filter-seqs \
+  --i-data saimiri_rep_seqs_dada2.qza \
+  --i-table saimiri_table_dada2_no-controls.qza \
+  --o-filtered-data saimiri_rep_seqs_CLEAN.qza
+
+echo "ending dada2 job $(date)"
+
+#!/bin/bash
+#SBATCH --job-name=phylotree
+#SBATCH --account=b1042
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=6
+#SBATCH --time=04:00:00
+#SBATCH --output=tree.out
+#SBATCH --error=tree.err
+#SBATCH --partition=genomics
+#SBATCH --mail-type=ALL 
+#SBATCH --mail-user=sharmi.sen@northwestern.edu  ## your email
+
+module purge all  
+module load qiime2/2024.5-amplicon
+
+##Build phylogenetic tree
+
+echo "Building phylogenetic tree $(date)"
+
+qiime phylogeny align-to-tree-mafft-fasttree --i-sequences saimiri_rep_seqs_dada2.qza \
+ --o-alignment saimiri_aligned_rep_seqs_dada2_Jan2026.qza \
+ --o-masked-alignment saimiri_masked_aligned_rep_seqs_dada2_Jan2026.qza \
+ --o-tree saimiri_unrooted_tree_Jan2026.qza --o-rooted-tree saimiri_rooted_tree_Jan2026.qza \
+ --p-n-threads 6
+
+echo "End of phylogenetic tree building $(date)"
+
+#!/bin/bash
+#SBATCH --account=b1042
+#SBATCH --partition=genomics
+#SBATCH --job-name=assign_taxa
+#SBATCH --output=taxa.out
+#SBATCH --error=taxa.err
+#SBATCH --time=4:00:00
+#SBATCH --mem=50G
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=6
+#SBATCH --mail-user=sharmi.sen@northwestern.edu
+#SBATCH --mail-type=END
+
+module purge all
+module load qiime2/2024.5-amplicon
+
+## Classifying ASVs taxonomically; scikit learn uses a naive bayes classifier. We use the training model here from a collection assembled by the QIIME devs.
+
+echo "Classifying ASVs taxonomically $(date)"
+
+qiime feature-classifier classify-sklearn --i-classifier /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/qiime_classifiers/silva-138-99-nb-classifier.qza \
+ --i-reads saimiri_rep_seqs_CLEAN.qza \
+ --o-classification saimiri_silva_taxonomy_Jan2026.qza \
+ --p-n-jobs 1
+
+echo "end of silva $(date)" 
+
+qiime feature-classifier classify-sklearn --i-classifier /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/qiime_classifiers/2024.09.backbone.full-length.nb.sklearn-1.4.2.qza \
+ --i-reads saimiri_rep_seqs_CLEAN.qza \
+ --o-classification saimiri_gg_taxonomy_Jan2026.qza \
+ --p-n-jobs 1 
+
+echo "end of greengenes $(date)" 
+
+qiime feature-classifier classify-sklearn --i-classifier /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/qiime_classifiers/gtdb_classifier_r220.qza \
+ --i-reads saimiri_rep_seqs_CLEAN.qza \
+ --o-classification /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_gtdb_taxonomy_Jan2026.qza \
+ --p-n-jobs 1
+
+echo "end of gtdb $(date)"
+
+## List ASVs and taxonomic assignments in table for making observations
+
+qiime metadata tabulate --m-input-file saimiri_silva_taxonomy_Jan2026.qza \
+ --o-visualization saimiri_silva_taxonomy_Jan2026.qzv
+
+qiime metadata tabulate --m-input-file saimiri_gg_taxonomy_Jan2026.qza \
+ --o-visualization saimiri_gg_taxonomy_Jan2026.qzv
+
+qiime metadata tabulate --m-input-file saimiri_gtdb_taxonomy_Jan2026.qza \
+ --o-visualization saimiri_gtdb_taxonomy_Jan2026.qzv
+
+echo "Filter chloroplast and mitochondrial sequences $(date)"
+
+qiime taxa filter-table --i-table saimiri_table_dada2_no-controls.qza \
+ --i-taxonomy saimiri_gg_taxonomy_Jan2026.qza --p-exclude mitochondria,chloroplast \
+ --o-filtered-table saimiri_gg_table_dada2_nomito_nochloro_Jan2026.qza
+
+## Check seqs were filtered correctly
+
+qiime feature-table summarize --i-table saimiri_gg_table_dada2_nomito_nochloro_Jan2026.qza \
+ --o-visualization saimiri_gg_table_dada2_nomito_nochloro_Jan2026.qzv \
+ --m-sample-metadata-file dada2_part3_metadata.tsv
+
+echo "end of summarize and filtering $(date)" 
+
+qiime diversity alpha-rarefaction \
+ --i-table saimiri_gg_table_dada2_nomito_nochloro_Jan2026.qza \
+ --i-phylogeny saimiri_rooted_tree_Jan2026.qza --o-visualization saimiri_alpha_rarefaction_curve_Jan2026.qzv --p-max-depth 15000
+
+
+qiime taxa barplot --i-table saimiri_gg_table_dada2_nomito_nochloro_Jan2026.qza \
+   --i-taxonomy saimiri_gg_taxonomy_Jan2026.qza \
+   --m-metadata-file dada2_part3_metadata.tsv --o-visualization saimiri_taxa_bar_plots_Jan2026.qzv
+
+
+   #!/bin/bash
+#SBATCH --account=b1042
+#SBATCH --partition=genomics
+#SBATCH --job-name=qiime_extract_beta
+#SBATCH --output=qiime_extract.out
+#SBATCH --error=qiime_extract.err
+#SBATCH --time=00:50:00
+#SBATCH --mem=10G
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mail-user=sharmi.sen@northwestern.edu
+#SBATCH --mail-type=END
+
+module purge all
+module load qiime2/2024.5-amplicon
+
+echo "Starting at $(date)" 
+  
+#ALPHA & BETA DIVERSITY
+
+qiime diversity core-metrics-phylogenetic --i-phylogeny /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_rooted_tree_Jan2026.qza \
+  --i-table /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_gg_table_dada2_nomito_nochloro_Jan2026.qza \
+  --p-sampling-depth 2000  --m-metadata-file /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_new_16S_metadata.txt \
+  --p-ignore-missing-samples --output-dir /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026
+
+echo "starting beta div matrix extractions" 
+
+#Weighted UniFrac
+
+qiime tools extract --input-path /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/weighted_unifrac_distance_matrix.qza \
+ --output-path /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/weighted_unifrac_distance_matrix
+
+#Unweighted UniFrac
+
+qiime tools extract --input-path /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/unweighted_unifrac_distance_matrix.qza \
+	--output-path /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/unweighted_unifrac_distance_matrix
+
+#Bray-Curtis
+
+qiime tools extract --input-path /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/bray_curtis_distance_matrix.qza \
+ --output-path /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/bray_curtis_distance_matrix
+
+echo "finshing up beta div" 
+
+#PCoA plots
+
+echo "PCOA plots" 
+
+qiime emperor plot --i-pcoa /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/weighted_unifrac_pcoa_results.qza \
+ --m-metadata-file /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_new_16S_metadata.txt \
+ --p-ignore-missing-samples \
+ --o-visualization /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/emperor_weighted_unifrac_pcoa_results.qzv
+
+
+qiime emperor plot --i-pcoa /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/unweighted_unifrac_pcoa_results.qza \
+ --p-ignore-missing-samples \
+ --m-metadata-file /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_new_16S_metadata.txt \
+ --o-visualization /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/emperor_unweighted_unifrac_pcoa_results.qzv
+
+#ALPHA DIVERSITY
+
+echo "alpha div"
+
+#Faith’s PD
+
+echo "extracting Faith's PD"
+
+qiime tools extract --input-path /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/faith_pd_vector.qza \
+ --output-path /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/Faiths_PD
+
+echo "extracting OTUs next"
+
+#Observed OTUs
+
+qiime tools extract --input-path  /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/observed_features_vector.qza \
+	--output-path  /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/observed_OTUs
+
+echo "extracting shannon div table"
+
+#Shannon
+
+qiime tools extract --input-path  /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/shannon_vector.qza \
+	--output-path /projects/b1057/sharmi/squirrel_monkey_project/16S_data/qiime_analysis_files/saimiri_core-metrics--results_Jan2026/Shannon
+
+echo "end of script $(date)"
