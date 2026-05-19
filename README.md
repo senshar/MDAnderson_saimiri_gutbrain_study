@@ -2,5 +2,5 @@
 Code and data for squirrel monkey manuscript in prep for BMC Bio.
 
 1. 16S_qiime - has scripts for analysis done in qiime to get ASVs
-2. shotgun - has scripts for profiling metagenomic data using HUMAnN3.9
+2. shotgun_bioinformatics - has scripts for profiling metagenomic data using HUMAnN3.9
 3. Sen_etal_BMC_Bio_MS - scripts for statistical analsyis and producing plots for MS. 
