@@ -1,7 +1,7 @@
 #This file contains all scripts used for metagenomic data analysis using biobakery workflows. All scripts were run on Northwestern's HPC QUEST
 
-#1. Kneaddata job 
-#!/bin/bash
+1. Kneaddata job 
+```#!/bin/bash
 #SBATCH --account=bXXXX
 #SBATCH --partition=bXXXX 
 #SBATCH --time=24:00:00 
@@ -46,6 +46,7 @@ R2=$(sed -n "${SLURM_ARRAY_TASK_ID}p" paired2_files.txt)
 cat ${R1} ${R2}  > "${R1//kneaddata_paired_1.fastq/kneadcat.fastq}"
 
 #concatenated files are input for running HUMAnN3.9
+```
 
 #3. running humann
 #!/bin/bash
