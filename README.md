@@ -6,6 +6,7 @@ Code and data for squirrel monkey manuscript in prep for BMC Bio.
 3. Sen_et_al_BMC_Bio_MS - scripts for statistical analsyis and producing plots for BMC Bio manuscript
 4. Datasets
  -   4.1. shotgun_metadata.RDS: contains metadata and outcome variables of interest
+   
     -  "Sample"
     -  "Location"
     -  "Animal"
@@ -47,7 +48,9 @@ Code and data for squirrel monkey manuscript in prep for BMC Bio.
     - "shotgun_atc_PCoA2"
     - "otu_faith"
     - "total_SCFA"           
-    - "asv_log_reads"         
+    - "asv_log_reads"
+
+     
 - 4.2 sbol16S_ps_without_contam_before_filtering.rds: phyloseq object containing taxonomy, feature table, and sample metadata
 - 4.3 sbol_filtered_pathway_dataJul12026.rds: filtered functional pathway table.
 - 4.4 sbol_metab_pareto: filtered, log transformed, pareto scaled metabolite matrix
