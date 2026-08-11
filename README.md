@@ -56,3 +56,4 @@ Code and data for squirrel monkey manuscript in prep for BMC Bio.
 - 4.4 sbol_metab_pareto: filtered, log transformed, pareto scaled metabolite matrix
 - 4.5 sbol_gbm_data_for_maaslin3_Aug10.rds: gut brain modules functional pathway
 - 4.6 sbol_GBM_metadata_maaslin_Aug112926.RDS: metadata for maaslin analyses for GBMs
+- 4.7 limma_metab_metadata_for_metabolites.csv: metadata for limma anlayses for metabolites
