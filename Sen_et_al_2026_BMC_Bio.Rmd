@@ -1,0 +1,2612 @@
+---
+title: "BMC_Bio_SaimiriMS1_2026"
+author: "Sharmi Sen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup}
+#Squirrel monkey 16S analyses: data visualization and models
+rm(list = ls())
+
+#Load libraries
+invisible(lapply(c("phyloseq", "tidyverse","tidyr", "vegan", "ggplot2", "MuMIn", "microbiome", "ggpubr", "corrplot", "RColorBrewer", "sjPlot", "patchwork", "viridis", "performance", "see", "mediation", "mgcv", "lme4", "e1071", "biomformat", "cowplot", "reshape2", "survival", "compositions", "survminer", "data.table", "bbmle", "ggsci", "maaslin3", "limma", "pheatmap", "stringr", "AICcmodavg", "mice"), library, character.only = TRUE))
+          
+'%!in%' <- function(x,y)!('%in%'(x,y)) 
+setwd("~/Desktop/POSTDOC PROJECTS/NORTHWESTERN/Squirrel Monkey Project")
+```
+
+#reading in files
+```{r}
+#16S data 
+metadata <- readRDS("saimiri_shotgun_metadata_updated_newloc_Aug42026.rds")
+ps       <- readRDS("sbol16S_ps_without_contam_before_filtering.rds") #this has negative controls but no features identified as contaminants and no features that are only present in one sample
+ps       <- prune_samples(sample_sums(ps) > 0, ps) #remove taxa that are in 0 samples
+ps       <- subset_samples(ps, Sample_or_Control == "Sample") #only keep samples
+ps_rel   <- transform_sample_counts(ps, function(x) x / sum(x))
+ps_rel #11163 taxa
+
+greg_data <- readxl::read_excel("gkw edited _MDAnderson_SaimiriMetadata_Mar062026.xlsx")
+#shotgun data with otu and SCFA
+shotgun_metadata <- readRDS("shotgun_metadata_with_otudiv_funcdiv_numreads_newlocJun82026.rds") #this has otu div (alpha beta) and functional pathway div (alpha div index)
+head(shotgun_metadata)
+colnames(shotgun_metadata)[12] <- "Housing type"
+colnames(shotgun_metadata)[16] <- "Enclosure size"
+##Read in data meabolomic matrix for untargeted metabolomites data
+feature_table   <- read.csv("old_stuff/sbol_metabolomics_feature_table.csv", row.names = 1, check.names = FALSE)
+feature_table   <- feature_table[1:128,]
+metab_metadata  <- read.csv("old_stuff/metadata_for_metabolomics.csv", row.names = 1, check.names = FALSE)
+annotations     <- read.csv("old_stuff/sbol_metabolite_list.csv", row.names = 1, check.names = FALSE)
+head(annotations)
+#Convert to numeric
+feature_matrix <- as.matrix(
+  sapply(feature_table, function(col) {
+    as.numeric(as.character(unlist(col)))
+  }))
+
+rownames(feature_matrix) <- rownames(feature_table)
+metab_present            <- colMeans(!is.na(feature_matrix))
+
+feature_matrix <- feature_matrix[, metab_present > 0.50]
+#which are not present in shotgun data 
+names_for_adding <- metab_metadata$Animal[match(rownames(feature_matrix), metab_metadata$normalized_name)]
+rownames(feature_matrix) <- shotgun_metadata$Sample[match(names_for_adding, shotgun_metadata$Animal)]
+#remove NA rownames
+feature_matrix <- feature_matrix[which(!is.na(rownames(feature_matrix))),] 
+#Remove zero-variance columns
+feature_matrix_filtered <- feature_matrix[, apply(feature_matrix, 2, sd, na.rm = TRUE) > 0] #this doesn't change anything
+
+metab_scaled <- scale(feature_matrix_filtered)
+metab_dist   <- dist(metab_scaled, method = "euclidean")
+
+#any correlations for the 16S div metrics and number of reads - should not be the case as they have been rarefied
+cor.test(log(shotgun_metadata$asv_reads), shotgun_metadata$otu_shannon)
+cor.test(log(shotgun_metadata$asv_reads), shotgun_metadata$otu_faith)
+cor.test(log(shotgun_metadata$asv_reads), shotgun_metadata$otu_richness)
+
+cor.test(log(shotgun_metadata$asv_reads), shotgun_metadata$otu_faith)
+cor.test(log(shotgun_metadata$asv_reads), shotgun_metadata$otu_richness)
+summary(lm(log(asv_reads) ~ Species, data = shotgun_metadata))
+
+cor.test(log(shotgun_metadata$asv_reads), shotgun_metadata$otu_PC1)
+cor.test(log(shotgun_metadata$asv_reads), shotgun_metadata$otu_PC2)
+cor.test(log(shotgun_metadata$asv_reads), shotgun_metadata$otu_PC3)
+
+cor.test(log(shotgun_metadata$num_reads), shotgun_metadata$shannon)
+cor.test(log(shotgun_metadata$num_reads), shotgun_metadata$simpson)
+cor.test(log(shotgun_metadata$num_reads), shotgun_metadata$observed_pathways)
+
+boliv_color <- c("#2A6EBBFF")
+set_color  <- c("#2A6EBBFF", "#F0AB00")
+```
+
+```{r}
+#mapping pathways 
+pathway_name_map <- c(
+  "ANAGLYCOLYSIS-PWY" = "Anaerobic glycolysis",
+  "ANAEROFRUCAT-PWY" = "Anaerobic fructose degradation",
+  "ARGDEG-PWY" = "Arginine degradation I (arginine succinyltransferase pathway)",
+  "ASPASN-PWY" = "L-aspartate and L-asparagine biosynthesis",
+  "CALVIN-PWY" = "Calvin-Benson-Bassham cycle",
+  "COA-PWY" = "Coenzyme A biosynthesis I",
+  "COBALSYN-PWY" = "Adenosylcobalamin (coenzyme B12) biosynthesis",
+  "DENOVOPURINE2-PWY" = "Purine nucleotide de novo biosynthesis II",
+  "FOLSYN-PWY" = "Tetrahydrofolate biosynthesis",
+  "GALACTUROCAT-PWY" = "D-galacturonate degradation I",
+  "GLUCONEO-PWY" = "Gluconeogenesis I",
+  "GLUDEG-I-PWY" = "GABA shunt",
+  "GLUDEG-II-PWY" = "L-glutamate degradation VII",
+  "GLYCOCAT-PWY" = "Glycolate and glyoxylate degradation I",
+  "GLYCOLYSIS" = "Glycolysis I",
+  "LACTOSECAT-PWY" = "Lactose and galactose degradation I",
+  "NONMEVIPP-PWY" = "Methylerythritol phosphate (MEP) pathway I",
+  "ORNARGDEG-PWY" = "Ornithine degradation I",
+  "P108-PWY" = "Pyruvate fermentation to acetate",
+  "P124-PWY" = "Bifidobacterium shunt (fructose-6-phosphate shunt)",
+  "PANTO-PWY" = "Phosphopantothenate biosynthesis I",
+  "PANTOSYN-PWY" = "Pantothenate biosynthesis I",
+  "PEPTIDOGLYCANSYN-PWY" = "Peptidoglycan biosynthesis I",
+  "PPGPPMET-PWY" = "ppGpp biosynthesis",
+  "PRPP-PWY" = "PRPP biosynthesis I",
+  "SER-GLYSYN-PWY" = "Superpathway of L-serine and glycine biosynthesis I",
+  "TRNA-CHARGING-PWY" = "tRNA charging",
+  "TRPSYN-PWY" = "L-tryptophan biosynthesis",
+  "PWY0-166" = "Superpathway of peptidoglycan biosynthesis",
+  "PWY0-1319" = "CDP-diacylglycerol biosynthesis II",
+  "PWY0-1586" = "Peptidoglycan maturation (meso-diaminopimelate-containing)",
+  "PWY-621" = "Sucrose degradation III",
+  "PWY-801" = "Cobalamin salvage",
+  "PWY-841" = "Heme biosynthesis II",
+  "PWY-922" = "Mevalonate pathway I",
+  "PWY-1042" = "Glycolysis IV",
+  "PWY-2941" = "L-lysine biosynthesis I",
+  "PWY-3841" = "Folate transformations II",
+  "PWY-5097" = "Purine nucleotide de novo biosynthesis II",
+  "PWY-5100" = "Pyruvate fermentation to acetate and lactate II",
+  "PWY-5121" = "Geranylgeranyl diphosphate biosynthesis I",
+  "PWY-5130" = "UMP biosynthesis",
+  "PWY-5136" = "Fatty acid β-oxidation II (peroxisome)",
+  "PWY-5188" = "Tetrapyrrole biosynthesis I (from glutamate)",
+  "PWY-5367" = "Petroselinate biosynthesis",
+  "PWY-5384" = "Sucrose degradation IV",
+  "PWY-5392" = "reductive tricarboxylic acid (TCA) cycle II",
+  "PWY-5484" = "Glycolysis II (from fructose 6-phosphate)",
+  "PWY-5667" = "CDP-diacylglycerol biosynthesis I",
+  "PWY-5686" = "UMP biosynthesis",
+  "PWY-5910" = "Superpathway of heme biosynthesis",
+  "PWY-5941" = "Glycogen degradation I",
+  "PWY-6121" = "5-aminoimidazole ribonucleotide biosynthesis",
+  "PWY-6122" = "5-aminoimidazole ribonucleotide biosynthesis II",
+  "PWY-6123" = "IMP biosynthesis III",
+  "PWY-6124" = "Adenosine nucleotide de novo biosynthesis II",
+  "PWY-6125" = "Guanosine nucleotide de novo biosynthesis I",
+  "PWY-6126" = "Adenosine nucleotide salvage I",
+  "PWY-6143" = "UDP-N-acetylmuramoyl-pentapeptide biosynthesis I",
+  "PWY-6151" = "S-adenosyl-L-methionine cycle",
+  "PWY-6277" = "Superpathway of 5-aminoimidazole ribonucleotide biosynthesis",
+  "PWY-6293" = "Superpathway of L-ascorbate degradation",
+  "PWY-6385" = "peptidoglycan biosynthesis III (mycobacteria)",
+  "PWY-6386" = "UDP-N-acetylmuramoyl-pentapeptide biosynthesis II",
+  "PWY-6387" = "UDP-N-acetylmuramoyl-pentapeptide biosynthesis III",
+  "PWY-6470" = "Peptidoglycan biosynthesis III",
+  "PWY-6471" = "Peptidoglycan biosynthesis IV (Enterococcus faecium)",
+  "PWY-6507" = "4-deoxy-L-threo-hex-4-enopyranuronate degradation",
+  "PWY-6527" = "Starch biosynthesis",
+  "PWY-6595" = "Superpathway of guanosine nucleotide de novo biosynthesis II",
+  "PWY-6607" = "Guanosine nucleotide salvage",
+  "PWY-6608" = "Guanosine nucleotide degradation III",
+  "PWY-6609" = "Guanosine nucleotide degradation IV",
+  "PWY-6612" = "Adenosine nucleotide salvage II",
+  "PWY-6700" = "Queuosine biosynthesis",
+  "PWY-6703" = "PreQ0 biosynthesis",
+  "PWY-6823" = "Molybdenum cofactor biosynthesis",
+  "PWY-6859" = "TCA cycle VIII (aerobic)",
+  "PWY-6876" = "Isopropanol biosynthesis",
+  "PWY-6936" = "Seleno-amino acid biosynthesis",
+  "PWY-7031" = "Superpathway of purine nucleotide salvage",
+  "PWY-7184" = "Pyrimidine deoxyribonucleotide de novo biosynthesis",
+  "PWY-7187" = "Pyrimidine ribonucleotide de novo biosynthesis",
+  "PWY-7197" = "Pyrimidine deoxyribonucleotide biosynthesis",
+  "PWY-7198" = "Pyrimidine ribonucleotide salvage",
+  "PWY-7199" = "Pyrimidine deoxyribonucleotide salvage",
+  "PWY-7210" = "Pyrimidine deoxyribonucleotides biosynthesis from CTP",
+  "PWY-7221" = "Guanosine nucleotide salvage II",
+  "PWY-7228" = "Superpathway of adenosine nucleotide biosynthesis",
+  "PWY-7229" = "Adenosine nucleotide biosynthesis",
+  "PWY-7234" = "Inosine-5'-phosphate biosynthesis II",
+  "PWY-7237" = "CDP-diacylglycerol biosynthesis III",
+  "PWY-7238" = "Sucrose biosynthesis II",
+  "PWY-7357" = "Thiamine diphosphate biosynthesis",
+  "PWY-7391" = "Anaerobic energy metabolism",
+  "PWY-7392" = "Aerobic respiration II",
+  "PWY-7790" = "Pyridoxal 5'-phosphate biosynthesis I",
+  "PWY-7791" = "Pyridoxal 5'-phosphate salvage",
+  "PWY-7858" = "(5Z)-dodecenoate biosynthesis II",
+  "PWY-7953" = "Glycogen biosynthesis I",
+  "PWY-7977" = "Lipid IVA biosynthesis",
+  "PWY-8178" = "UDP-N-acetylmuramoyl-pentapeptide biosynthesis IV",
+  "PWY66-389" = "Purine nucleobase degradation",
+  "PWY66-429" = "Allantoin degradation to glyoxylate III",  
+  "P221-PWY" = "Octane oxidation",
+  "COA-PWY-1" = "Coenzyme A biosynthesis II (mammalian)",
+  "PWY-6629" = "Phosphatidylglycerol biosynthesis II",
+  "GLYCOGENSYNTH-PWY" = "Glycogen biosynthesis I (from ADP-D-glucose)",
+  "HSERMETANA-PWY" = "L-methionine biosynthesis via transsulfuration",
+  "PWY-7851" = "Superpathway of coenzyme A biosynthesis",
+  "PWY-6317" = "Galactose degradation I (Leloir pathway)",
+  "HISTSYN-PWY" = "L-histidine biosynthesis",
+  "PWY-6163" = "Chorismate biosynthesis from 3-dehydroquinate",
+  "PWY-7208" = "Superpathway of pyrimidine nucleobase salvage",
+  "PWY-5695" = "Purine nucleotide degradation",
+  "PWY-7220" = "Adenosine deoxyribonucleotide de novo biosynthesis II",
+  "PWY-7222" = "Guanosine deoxyribonucleotide de novo biosynthesis II",
+  "1CMET2-PWY" = "N10-formyl-tetrahydrofolate biosynthesis",
+  "PWY-7560" = "MEP Pathway II",
+  "DTDPRHAMSYN-PWY" = "dTDP-L-rhamnose biosynthesis",
+  "COLANSYN-PWY" = "Colanic acid biosynthesis", 
+  "PROPFERM-PWY" = "Propionate fermentation",
+  "PWY-8188" = "Stickland fermentation (glycine branch)",
+  "PWY-8189" = "Stickland fermentation (proline branch)",
+  "PWY-5494" = "Pyruvate fermentation to short-chain fatty acids",
+  "PWY-6478" = "GDP-D-glycero-alpha-D-manno-heptose biosynthesis",
+  "P41-PWY" = "Pyruvate fermentation to acetate and (S)-lactate I",
+  "PWY-6138" = "CMP-N-acetylneuraminate biosynthesis I (eukaryotes)",
+  "PWY-5345" = "L-methionine biosynthesis III",
+  "PYRIDNUCSYN-PWY" = "NAD biosynthesis I (from aspartate)",
+  "PWY-7316" = "dTDP-N-acetylviosamine biosynthesis",
+  "FASYN-INITIAL-PWY" = "Fatty acid biosynthesis – initial steps",
+  "RIBOSYN2-PWY" = "Riboflavin biosynthesis",
+  "PWY-6897" = "Thiamine salvage II",
+  "RHAMCAT-PWY" = "L-rhamnose degradation I",
+  "PWY-6284" = "Superpathway of unsaturated fatty acids biosynthesis (E.coli)",
+  "PWY-5659" = "GDP-mannose biosynthesis",
+  "P562-PWY" = "Myo-inositol degradation I",
+  "SULFATE-CYS-PWY" = "L-cysteine biosynthesis from sulfate",
+  "PWY-1269" = "CMP-3-deoxy-D-manno-octulosonate biosynthesis I",
+  "PWY-1861" = "Formaldehyde assimilation",
+  "PWY-7688" = "dTDP-D-ravidosamine and dTDP-4-acetyl-D-ravidosamine biosynthesis",
+  "COMPLETE-ARO-PWY" = "Superpathway of aromatic amino acid biosynthesis",
+  "PWY1ZNC-1" = "Assimilatory sulfate reduction IV,",
+  "PWY-5855" = "Ubiquinol-7 biosynthesis (prokaryotic)",
+  "SO4ASSIM-PWY" = "Sulfate reduction I (assimilatory)",
+  "PWY-7323" = "superpathway of GDP-mannose-derived O-antigen building blocks biosynthesis",
+  "PWY-6285" = "superpathway of fatty acid biosynthesis",
+  "BRANCHED-CHAIN-AA-SYN-PWY" = "Superpathway of branched-chain amino acid biosynthesis",
+  "P185-PWY" = "Formaldehyde assimilation I",
+  "ALLANTOINDEG-PWY" = "Allantoin degradation to glyoxylate",
+  "PWY-7527" = "L-methionine salvage cycle III")
+
+```
+
+#1. Species specific differences for 16S, shotgun, SCFA, and metabolomics 
+```{r}
+#two way tests for taxonomic and functional div data
+wilcox.test(otu_shannon ~ Species, data = shotgun_metadata)
+effectsize::rank_biserial(otu_shannon ~ Species, data = shotgun_metadata)
+shotgun_metadata %>% group_by(Species) %>% summarise(median(otu_shannon)) 
+
+wilcox.test(otu_richness ~ Species, data = shotgun_metadata)
+effectsize::rank_biserial(otu_richness ~ Species, data = shotgun_metadata)
+shotgun_metadata %>% group_by(Species) %>% summarise(median(otu_richness)) 
+
+wilcox.test(shannon ~ Species, data = shotgun_metadata)
+effectsize::rank_biserial(shannon ~ Species, data = shotgun_metadata)
+
+wilcox.test(observed_pathways ~ Species, data = shotgun_metadata)
+effectsize::rank_biserial(observed_pathways ~ Species, data = shotgun_metadata)
+
+wilcox.test(acetate/total_SCFA ~ Species, data = shotgun_metadata)
+effectsize::rank_biserial(acetate/total_SCFA ~ Species, data = shotgun_metadata)
+
+wilcox.test(valerate/total_SCFA ~ Species, data = shotgun_metadata)
+effectsize::rank_biserial(valerate/total_SCFA ~ Species, data = shotgun_metadata)
+
+wilcox.test(propionate/total_SCFA ~ Species, data = shotgun_metadata)
+effectsize::rank_biserial(propionate/total_SCFA ~ Species, data = shotgun_metadata)
+
+wilcox.test(butyrate/total_SCFA ~ Species, data = shotgun_metadata)
+effectsize::rank_biserial(butyrate/total_SCFA ~ Species, data = shotgun_metadata)
+
+#adding the 16S figures - shannon, richness for ASVs
+fig2a.1 <- shotgun_metadata %>% ggplot( aes(x = Species, y = otu_shannon, color = Species)) +
+  geom_boxplot() + geom_jitter(alpha = 0.3, size = 2) + xlab("") + ylab("Shannon diversity of ASVs") +
+  theme_pubr(base_size = 24) + scale_color_bmj(name = NULL) + geom_signif(comparisons = list(c("SB", "SC")), map_signif_level = TRUE, color = "black",  test = "wilcox.test", step_increase = 0.1 ) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) 
+
+fig2a.2 <- shotgun_metadata %>% ggplot( aes(x = Species, y = otu_richness, color = Species)) +
+  geom_boxplot() + geom_jitter(alpha = 0.3, size = 2) + xlab("") + ylab("Number of observed ASVs") +
+   scale_color_bmj() + theme_pubr(base_size = 24) + geom_signif(comparisons = list(c("SB", "SC")), map_signif_level = TRUE, color = "black",  test = "wilcox.test", step_increase = 0.1 ) +  labs(title = " ") + theme(legend.position = "none",, axis.text.x = element_blank()) 
+
+fig2a.3 <- shotgun_metadata %>% ggplot( aes(x = otu_PC1, y = otu_PC2, color = Species)) +
+  geom_point(alpha = 0.6, size = 4) + labs(title = " ") + xlab("PCoA1") + ylab("PCoA2") +
+  theme_pubr(base_size = 24) + scale_color_bmj() 
+
+fig2_block2a <- fig2a.1 + fig2a.2 + fig2a.3
+
+#PERMANOVAs for 16S
+#Aitchison PCA = PCA on clr-transformed relative abundances 
+pseudocount            <- 0.65 #for clr-transformation
+#alpha div measures
+ftbl                   <- t(as(otu_table(ps),"matrix"))
+feature_clr_abund      <- compositions::clr(t(as(otu_table(ps), "matrix") + pseudocount))
+feature_pca_abund      <- prcomp(feature_clr_abund, center = TRUE, scale. = FALSE) # PCA on clr transformed data 
+
+asv_metadata           <- readRDS("asv_metadata_Jun92026_newloc_type.rds") #update this too
+aitchison_dist         <- dist(feature_clr_abund, method = "euclidean")
+head(aitchison_dist)
+nrow(aitchison_dist) 
+nrow(asv_metadata)
+table(asv_metadata$housing_type)
+
+asv_metadata$housing_type     <- greg_data$new_location_type[match(as.numeric(asv_metadata$simple.id), greg_data$Animal)]
+asv_metadata$housing_type[82] <-  "Naïve social group"
+set.seed(123)
+perm_asv <- adonis2(aitchison_dist ~ Species + Sex + Age + housing_type + enclosure_size,  data = asv_metadata, permutations = 9999, by = "margin")
+summary(perm_asv) 
+
+#dispersion tests
+permutest(betadisper(aitchison_dist, asv_metadata$Species)) #significant
+#As age is continuous, extract the distances from each sample to the overall group centroid and correlate those distances directly with your continuous Age variable
+sample_distances <- betadisper(aitchison_dist, asv_metadata$Species)$distances
+cor.test(sample_distances, asv_metadata$Age, method = "spearman") #non significant 
+
+permutest(betadisper(aitchison_dist, asv_metadata$Sex)) #non significant 
+permutest(betadisper(aitchison_dist, asv_metadata$housing_type)) #significant 
+permutest(betadisper(aitchison_dist, asv_metadata$enclosure_size)) #non significant 
+
+#asv results
+adonis_asv          <- as.data.frame(perm_asv)
+adonis_asv$Variable <- rownames(adonis_asv)
+adonis_asv <- adonis_asv %>%
+                        dplyr::filter(Variable %!in% c("Residual", "Total")) %>%
+                        dplyr::select(Variable, R2,`Pr(>F)`) %>%
+                        dplyr::mutate(Omic = "16S") %>% 
+                        mutate(sig = case_when(`Pr(>F)` < 0.001 ~ "***",`Pr(>F)` < 0.01  ~ "**",`Pr(>F)` < 0.05  ~ "*", TRUE ~ ""))
+
+adonis_asv 
+adonis_asv$Variable[which(adonis_asv$Variable == "housing_type")]       <- c("Housing type")
+adonis_asv$Variable[which(adonis_asv$Variable == "enclosure_size")]     <- c("Enclosure size")
+adonis_asv$Variable <- factor(adonis_asv$Variable, levels = c("Species", "Age", "Sex", "Housing type", "Enclosure size"))
+
+#create the plot
+fig2_block2b <- ggplot(adonis_asv , aes(x = Variable, y = R2 * 100, fill = Variable)) +
+  geom_col() + scale_fill_npg(alpha = 0.8) + 
+  geom_text(aes(label = sig), hjust = -0.5, vjust = 0.2) +
+  coord_flip() + facet_grid(.~ Omic) + ylim(c(0,6)) +
+  theme_pubr(base_size = 24) + xlab("") +
+  theme(legend.position = "none", strip.text = element_text(face = "bold")) +
+  labs(x = NULL, y = expression("% Partial " * R^2 * "explained"), tag = "C", size = 24, face = "bold")
+
+BMC_Fig2 <- plot_grid(fig2_block2a, fig2_block2b)
+#ggsave( "BMC_BioFig2.jpeg", BMC_Fig2, width = 27, height = 8, dpi = 500, units = "in")
+
+###Next adding the shotgun div figures for functional data
+fig2b.1 <- shotgun_metadata %>% ggplot( aes(x = Species, y = shannon, color = Species)) +
+  geom_boxplot() + geom_jitter(alpha = 0.3, size = 2) + xlab("") + ylab("Shannon diversity \nfunctional pathways") +
+  theme_pubr(base_size = 24) + scale_color_bmj() +
+  labs(title = " ") + theme(axis.text.x = element_blank())
+
+fig2b.2 <- shotgun_metadata %>% ggplot( aes(x = Species, y = observed_pathways_new, color = Species)) +
+  geom_boxplot() + geom_jitter(alpha = 0.3, size = 2) + xlab("") + ylab("Number of observed \nfunctional pathways") +
+  theme_pubr(base_size = 24) + scale_color_bmj()  +
+  labs(title = " ") + theme(axis.text.x = element_blank())
+ 
+#Plot PCA
+fig2b.3 <- ggplot(shotgun_metadata, aes(x = shotgun_atc_PCoA1, y = shotgun_atc_PCoA2, color = Species)) +
+  geom_point(size = 4, alpha = 0.6) + scale_color_bmj()  +
+  labs(title = " ")  + xlab("PCoA1") + ylab("PCoA2") +
+  theme_pubr(base_size = 24)  
+
+Fig3_block1 <- plot_grid(fig2b.1, fig2b.2, fig2b.3, ncol = 3, nrow = 1)
+
+#Permanova results 
+pathway_aitch_dist <- readRDS("sbol_pathway_aitchison.rds")
+head(pathway_aitch_dist)
+
+perm_func         <- adonis2(pathway_aitch_dist ~ Species + Age + Sex + `Housing type` + `Enclosure size`,
+  data = shotgun_metadata,
+  permutations = 9999,
+  by = "margin")
+perm_func
+
+#dispersion tests
+permutest(betadisper(pathway_aitch_dist, shotgun_metadata$Species))
+permutest(betadisper(pathway_aitch_dist, shotgun_metadata$Age))
+permutest(betadisper(pathway_aitch_dist, shotgun_metadata$`Housing type`)) #all ok here
+permutest(betadisper(pathway_aitch_dist, shotgun_metadata$Sex)) 
+permutest(betadisper(pathway_aitch_dist, shotgun_metadata$`Enclosure size`)) 
+
+
+#function results
+adonis_func          <- as.data.frame(perm_func)
+  adonis_func$Variable <- rownames(adonis_func)
+  adonis_func <- adonis_func %>%
+    dplyr::filter(Variable %!in% c("Residual", "Total")) %>%
+    dplyr::select(Variable, R2,`Pr(>F)`) %>%
+    dplyr::mutate(Omic = "functional pathways") %>% mutate(sig = case_when(`Pr(>F)` < 0.001 ~ "***",`Pr(>F)` < 0.01  ~ "**",`Pr(>F)` < 0.05  ~ "*", TRUE ~ ""))
+  
+adonis_func$Variable[which(adonis_func$Variable ==  "`Housing type`")]     <- "Housing type"
+adonis_func$Variable[which(adonis_func$Variable ==  "`Enclosure size`")]   <- "Enclosure size"
+ 
+  
+adonis_func$Variable <- factor(adonis_func$Variable, levels = c("Species", "Age", "Sex", "Housing type", "Enclosure size"))
+Fig3_block2 <- ggplot(adonis_func , aes(x = (Variable), y = R2 * 100, fill = Variable)) +
+  geom_col() + scale_fill_npg(alpha = 0.8) +
+  geom_text(aes(label = sig), hjust = -0.5, vjust = 0.2) +
+  coord_flip() + facet_grid(.~ Omic) + ylim(c(0,6)) +
+  theme_pubr(base_size = 24) + 
+  theme( legend.position = "none", strip.text = element_text(face = "bold")) +
+  labs(x = NULL,y = expression("% Partial " * R^2 * "explained"))  
+
+#add SCFA next
+fig3c.1 <- shotgun_metadata %>% ggplot(aes(x = Species, y = acetate/total_SCFA, color = Species)) + geom_violin()  + geom_jitter(size = 4, alpha = 0.6) +
+  theme_pubr(base_size = 24) + scale_color_bmj()  + xlab("") + ylab("prop of acetate") + theme(legend.position = "none") 
+
+fig3c.2 <- shotgun_metadata %>% ggplot(aes(x = Species, y = butyrate/total_SCFA, color = Species)) + geom_violin()  + geom_jitter(size = 4, alpha = 0.6) +
+  theme_pubr(base_size = 24) + scale_color_bmj()  + xlab("") + ylab("prop of butyrate") + theme(legend.position = "none") 
+
+fig3c.3 <- shotgun_metadata %>% ggplot(aes(x = Species, y = propionate/total_SCFA, color = Species)) + geom_violin()  + geom_jitter(size = 4, alpha = 0.6) +
+  theme_pubr(base_size = 24) + scale_color_bmj()  + xlab("") + ylab("prop of propionate") + theme(legend.position = "none") 
+
+fig3c.4 <- shotgun_metadata %>% ggplot(aes(x = Species, y = valerate/total_SCFA, color = Species)) + geom_violin()  + geom_jitter(size = 4, alpha = 0.6) +
+  theme_pubr(base_size = 24) + scale_color_bmj()  + xlab("") + ylab("prop of isovalerate") + theme(legend.position = "none")  
+
+Fig3_block3 <- (fig2c.1 + fig2c.2) / (fig2c.3 + fig2c.4)
+Fig3_block3
+
+#add metabolites next - PCA and permanova
+metadata      <- read.csv("metadata_for_metabolomics.csv", row.names = 1, check.names = FALSE)
+metab_pareto  <- readRDS("sbol_pareto_scaled_metabolites.rds")
+metab_nmds    <- metab_pareto
+#Run NMDS
+set.seed(123)
+nmds_res <- metaMDS(metab_nmds, distance = "bray",   # or "euclidean"
+  k = 2,
+  trymax = 100,
+  autotransform = FALSE)
+#Stress value
+nmds_res$stress
+
+nmds_df                 <- as.data.frame(scores(nmds_res))
+nmds_df$normalized_name <- rownames(nmds_df)
+nmds_df                 <- left_join(nmds_df, metadata, by = "normalized_name")
+
+#plot
+Fig3_block4 <- nmds_df %>% filter(!is.na(Species)) %>%  ggplot(aes(NMDS1, NMDS2, color = Species)) +
+  geom_point(size = 3, alpha = 0.6) +
+  theme_pubr(base_size = 24) + stat_ellipse(level = 0.95,
+               geom = "polygon",
+               alpha = 0.02) + labs(title = "Untargeted metabolomics") + scale_color_bmj()
+Fig3_block4
+
+perm_metab <- adonis2(metab_dist ~ Species + Age + Sex + `Housing type` + `Enclosure size`, data = shotgun_metadata, permutations = 9999, by = "margin")
+perm_metab
+
+#function results
+adonis_metab          <- as.data.frame(perm_metab)
+  adonis_metab$Variable <- rownames(adonis_metab)
+  adonis_metab <- adonis_metab %>%
+    dplyr::filter(Variable %!in% c("Residual", "Total")) %>%
+    dplyr::select(Variable, R2,`Pr(>F)`) %>%
+    dplyr::mutate(Omic = "metabolites")  %>% mutate(sig = case_when(`Pr(>F)` < 0.001 ~ "***",`Pr(>F)` < 0.01  ~ "**",`Pr(>F)` < 0.05  ~ "*", TRUE ~ ""))
+
+adonis_metab$Variable[which(adonis_metab$Variable ==  "`Housing type`")]     <- "Housing type"
+adonis_metab$Variable[which(adonis_metab$Variable ==  "`Enclosure size`")]   <- "Enclosure size"
+ 
+  
+adonis_metab$Variable <- factor(adonis_metab$Variable, levels = c("Species", "Age", "Sex", "Housing type", "Enclosure size"))
+
+Fig3_block5 <- ggplot( adonis_metab , aes(x = (Variable), y = R2 * 100, fill = Variable)) +
+  geom_col()  + scale_fill_npg(alpha = 0.8) +
+  geom_text(aes(label = sig), hjust = -0.5, vjust = 0.2) +
+  coord_flip() + facet_grid(.~ Omic) +
+  theme_pubr(base_size = 24) + ylim(c(0,6)) +
+  theme( legend.position = "none", strip.text = element_text(face = "bold")) +
+  labs(x = NULL,y = expression("% Partial " * R^2 * "explained"))  
+
+#dispersion tests
+permutest(betadisper(metab_dist, shotgun_metadata$Species))
+permutest(betadisper(metab_dist, shotgun_metadata$Age))
+permutest(betadisper(metab_dist, shotgun_metadata$Location_Type)) #only location is significant
+permutest(betadisper(metab_dist, shotgun_metadata$Sex)) 
+permutest(betadisper(metab_dist, shotgun_metadata$enclosure)) 
+
+
+Fig3 <- (Fig3_block1 | Fig3_block2) / (Fig3_block3 | Fig3_block4 | Fig3_block5) + plot_layout(guides = "collect")
+#ggsave("BMC_BioFig3.jpeg", Fig3, dpi = 300, width = 28, height = 14, units = "in")
+```
+
+#2.1. Differential abundance of taxa
+```{r}
+#Testing differential abundances (16S and shotgun data) using Maaslin3 - prep the maaslin3 metadata for both shotgun and 16S and then just feed into this chunk
+genus_rel            <- read.csv("genus_abundance_for_MaAsLin3.csv")
+metadata_maaslin_asv <- readRDS("metadata_maaslin_asv.RDS")
+#save this as an RDS object 
+saveRDS(metadata_maaslin_asv, "metadata_maaslin_asv.RDS")
+metadata_maaslin_asv[metadata_maaslin_asv$Location_type != "Individual",]
+
+table(metadata_maaslin_asv$sample.id)
+metadata_maaslin_asv <- sample_data(ps_rel)
+metadata_maaslin_asv <- data.frame(metadata_maaslin_asv)
+head(shotgun_metadata) #add the right age group.
+metadata_maaslin_asv$Age_group        <- shotgun_metadata$Age_group1[match(metadata_maaslin_asv$sample.id, asv_metadata$sample.id)] 
+metadata_maaslin_asv$Age_group        <- factor(metadata_maaslin_asv$Age_group, levels = c("Infant", "Yearling", "Juvenile", "Adult", "Geriatric", "Geriatric_old"))
+metadata_maaslin_asv$Location_Type    <- asv_metadata$Location_type[match(metadata_maaslin_asv$sample.id, asv_metadata$sample.id)]
+metadata_maaslin_asv$enclosure        <- asv_metadata$enclosure[match(metadata_maaslin_asv$sample.id, asv_metadata$sample.id)]
+
+#Clean metadata
+metadata_maaslin_asv$Species           <- factor(metadata_maaslin_asv$Species)
+metadata_maaslin_asv$Sex               <- factor(metadata_maaslin_asv$Sex)
+metadata_maaslin_asv$Location_Type     <- factor(metadata_maaslin_asv$Location_Type, levels = c("Naïve social group","Experimental group","Treatment group","Individual"))
+
+metadata_maaslin_asv$Location_Type     <- relevel(metadata_maaslin_asv$Location_Type, ref = "Experimental group")
+metadata_maaslin_asv$enclosure         <- factor(metadata_maaslin_asv$enclosure)
+metadata_maaslin_asv$enclosure         <- relevel(metadata_maaslin_asv$enclosure, ref = "Small")
+metadata_maaslin_asv                   <- metadata_maaslin_asv[which(!is.na(metadata_maaslin_asv$Species)),]
+metadata_maaslin_asv$Age               <- asv_metadata$Age[match(metadata_maaslin_asv$sample.id, asv_metadata$sample.id)] 
+
+str(metadata_maaslin_asv)
+
+#metadata_maaslin_asv$Age_group[82] <- "Infant"
+metadata_maaslin_asv$Age[82] <- 0
+
+metadata_maaslin_asv[82,]
+metadata_maaslin_asv$Age_group[which(is.na(metadata_maaslin_asv$Age_group))] <- "Geriatric"
+metadata_maaslin_asv$Age[which(is.na(metadata_maaslin_asv$Age))] <- 20
+rownames(metadata_maaslin_asv)
+rownames(filtered_genus_table)
+rownames(genus_rel)
+head(metadata_maaslin_asv)
+library(maaslin3)
+#remove the unknown taxa from genus_rel file
+
+genus_rel <- genus_rel %>% dplyr::select(-Unknown) %>% as.data.frame() #removing teh unknown genus
+#Species and age only
+fit_species_age_group_both_species <- maaslin3(input_data = genus_rel,
+                                          input_metadata = metadata_maaslin_asv,
+                                          output = "maaslin3_species_age_genus_abun_Aug7",
+                                          formula  = "~ Species + Age", 
+                                          normalization = "TSS", 
+                                          transform = "LOG",
+                                          standardize = FALSE, 
+                                          max_significance = 0.1,
+                                          max_pngs = 100,  evaluate_only = "abundance", warn_prevalence = F,
+                                          cores = 1, save_models = TRUE)
+
+
+results                               <- read.delim("maaslin3_species_age_genus_abun_Aug7/all_results.tsv") #3 genus only with abundance only selection
+abundance_results                     <- subset(results, model == "abundance")
+
+abundance_results %>% filter(metadata == "Species", qval_joint < 0.05) %>% as.data.frame() %>% nrow()
+abundance_results %>% filter(metadata == "Age", qval_joint < 0.05) %>% as.data.frame() %>% nrow()
+
+abundance_results$direction           <- ifelse(abundance_results$coef < 0, "lower in SC", "higher in SC")
+abundance_results$log_qval_individual <- -log10(abundance_results$qval_individual)
+-log10(0.05)
+species_results             <- abundance_results %>% filter(metadata == "Species", qval_joint < 0.05) %>% as.data.frame()
+species_results$direction   <- ifelse(species_results$coef < 0, "lower in SC", "higher in SC")
+species_results$direction   <- factor(species_results$direction, levels = c("lower in SC", "higher in SC"))
+
+#keep significant hits only
+sig_results <- species_results %>%
+  filter(qval_joint < 0.05) 
+
+#Reorder taxa/genera by coefficient size
+sig_results <- sig_results %>%
+  mutate(feature = fct_reorder(feature, coef), direction = ifelse(coef < 0, "lower in SC", "higher in SC"))
+
+#Plot only sig
+genus_volcano_plot <- abundance_results %>% filter(!is.na(qval_individual) & metadata  == "Species") %>% ggplot(aes(x = coef, y = log_qval_individual)) +
+  geom_point(aes(color = direction),
+             size = 4, alpha = 0.6) +
+  geom_vline(xintercept = 0,
+             linetype = "dashed") +  scale_fill_manual(values = c("lightblue","coral"),
+    name = "qval_joint < 0.05") + geom_hline(yintercept = 1.3, linetype = "dotted", color = "maroon") +
+  theme_pubr(base_size = 24) +
+  labs( x = "Beta coefficient",
+    y = "-log10(q-value)",
+    title = "ASV abundance associations (by host species)") + theme(plot.title = element_text(hjust = 0.5, size = 20)) 
+genus_volcano_plot #Fig 4A
+
+
+genus_diff_maaslin <- ggplot(sig_results, aes(x = coef, y = feature, fill = direction)) +
+  geom_col() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_fill_manual(values = c("lightblue", "coral"),
+    name = "direction of effect") +
+  labs(title = "Differential abundance associations",
+    x = "Model coefficient (beta)",
+    y = "Genus") +  theme_pubr(base_size = 24)  + theme(panel.grid.major.y = element_blank(), legend.position = "right")
+
+genus_diff_maaslin #Fig 4B
+
+abundance_results$direction <- factor(abundance_results$direction, levels = c("lower in SC", "higher in SC"))
+
+write.csv(sig_results, "genus_maaslin_species.csv" , row.names = F)
+
+#Species and all other covariates 
+fit_species_allcovariates         <- maaslin3(input_data = genus_rel,
+                                          input_metadata = metadata_maaslin_asv[which(metadata_maaslin_asv$Species == "SB"),] , #for boliviensis only metadata_maaslin_asv[which(metadata_maaslin_asv$Species == "SB"),] result is in "maaslin3_sbspecies_genus_asv_checkall_Aug6"
+                                          output = "maaslin3_species_genus_asv_SBonlycheckall_Aug12",
+                                          formula  = "~ Age + Sex ", 
+                                          normalization = "TSS", 
+                                          transform = "LOG",
+                                          standardize = FALSE, 
+                                          max_significance = 0.1,
+                                          evaluate_only = "abundance", warn_prevalence = F,max_pngs = 100,
+                                          cores = 1, save_models = TRUE)
+#nothing is significant when including all covariates
+
+```
+
+#2.2. Differential abundance of functional pathways across the two species.
+```{r}
+#SHOTGUN MAASLIN3
+filtered_pathway          <- readRDS("/Users/sharmisen/Desktop/POSTDOC PROJECTS/NORTHWESTERN/Squirrel Monkey Project/sbol_filtered_pathway_dataJul12026.rds")
+filtered_pathway <- filtered_pathway[-87,] #removing the repeat 6524
+head(filtered_pathway)
+filtered_pathway_metadata <- shotgun_metadata
+which(rownames(filtered_pathway) == "6524-SBOL-USA-22-LW-SH-1_S228_knead_merged_Abundance")
+
+rownames(filtered_pathway) <- substr(rownames(filtered_pathway), 1,19)
+rownames(filtered_pathway_metadata)
+
+head(filtered_pathway_metadata)
+
+str(filtered_pathway_metadata)
+rownames(filtered_pathway_metadata) 
+#changing categorical variables to factors and assinging references
+filtered_pathway_metadata$Location_Type <- factor(filtered_pathway_metadata$Location_Type, levels = c("Naïve social group", "Experimental group", "Treatment group", "Individual" ))
+filtered_pathway_metadata$Location_Type <- relevel(filtered_pathway_metadata$Location_Type, ref = "Naïve social group")
+filtered_pathway_metadata$enclosure     <- factor(filtered_pathway_metadata$enclosure, levels = c("Small", "Medium", "Large", "Individual"))
+filtered_pathway_metadata$enclosure     <- relevel(filtered_pathway_metadata$enclosure, ref = "Small")
+
+#DO SHOTGUN MAASLIN FOR both SPECIES - to report species level differences only first
+#All covariates
+fit_pathway_all <- maaslin3(input_data = filtered_pathway,
+                                          input_metadata = filtered_pathway_metadata,
+                                          output = "maaslin_all_covariates_pathway_bothabunprevAug7",
+                                          formula  = "~ Species + Age + Location_Type + enclosure ", 
+                                          normalization = "TSS", 
+                                          transform = "LOG",
+                                          standardize = FALSE, 
+                                          max_significance = 0.1,
+                                          max_pngs = 100,
+                                          cores = 1, 
+                                          save_models = TRUE)
+
+results_path          <- read.delim("maaslin_all_covariates_pathway_bothabunprevAug7/all_results.tsv") #just pull out species here first
+
+abundance_results_func <- subset(results_path, model == "abundance")
+abundance_results_func$log_qval_individual <- -log10(abundance_results_func$qval_individual)
+abundance_results_func$color <- ifelse(abundance_results_func$coef < 0 , "lower in SC", "higher in SC")
+abundance_results_func$color <- factor(abundance_results_func$color, level = c("lower in SC", "higher in SC"))
+#Optional: keep significant hits only
+sig_results_funct      <- abundance_results_func %>% filter(qval_joint < 0.05)
+head(sig_results_funct)
+
+sig_results_funct$PathwayID   <- str_remove(sig_results_funct$feature, ":.*")
+sig_results_funct$PathwayName <- pathway_name_map[sig_results_funct$PathwayID]
+
+sig_results_funct %>% filter(metadata == "Species" & !is.na(qval_individual) & qval_individual < 0.05  ) %>% nrow() #52
+sig_results_funct %>% filter(metadata == "Location_Type" & !is.na(qval_individual) & qval_individual < 0.05 ) %>% nrow() #8
+sig_results_funct %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05 ) %>% nrow() #79
+sig_results_funct %>% filter(metadata == "enclosure" & !is.na(qval_individual) & qval_individual < 0.05 ) %>% nrow() #5
+#subset by species
+sig_results_funct_species  <- sig_results_funct %>% filter(metadata == "Species" & !is.na(qval_individual) & qval_individual < 0.05) %>% as.data.frame()
+#Reorder by coefficient size
+sig_results_funct_species$color    <- ifelse(sig_results_funct_species$coef < 0, "lower in SC", "higher in SC")
+sig_results_funct_species          <- sig_results_funct_species %>% arrange(coef) %>% as.data.frame()
+sig_results_funct_species$color    <- factor(sig_results_funct_species$color, level = c( "lower in SC", "higher in SC"))
+
+#Plot only sig # do separate for  "species"
+
+volcano_plot_sig_func_species <- abundance_results_func  %>% filter(metadata == "Species" & !is.na(coef)) %>% ggplot(aes(x = coef, y = log_qval_individual, col = color)) +
+geom_jitter(size = 4, alpha = 0.75) + geom_hline(yintercept = 1.3, linetype = "dotted", color = "maroon") +
+  geom_vline(xintercept = 0,
+             linetype = "dashed") +  scale_fill_manual(values = c( "lightblue","coral"),  name = "qval_joint < 0.05") + 
+  theme_pubr(base_size = 24) +
+  labs( x = "Beta coefficient",
+    y = "-log10(q-value)",
+    title = "functional pathway abundance\n  associations in SC") + theme(plot.title = element_text(hjust = 0.5))
+volcano_plot_sig_func_species #BMC_BioFig4C
+
+sig_results_funct_species_fig <- sig_results_funct_species %>% filter(!is.na(qval_individual) & qval_individual < 0.05) %>% 
+  arrange(coef) %>% slice_head(n = 30) %>%  ggplot(aes(x = coef, y = reorder(PathwayName, coef), fill = color)) + 
+  geom_col() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_fill_manual(values = c("coral","lightblue"),
+    name = "direction of effect") + 
+  labs(title = "Differentially abundant functional pathways in SC",
+    x = "Model coefficient (beta)",
+    y = "Pathway") +  theme_pubr(base_size = 24)  + theme(panel.grid.major.y = element_blank(), legend.position = "right", plot.title = element_text(hjust = 0.5, size = 24))
+sig_results_funct_species_fig
+
+#ggsave( "BMC_BioFig4D", sig_results_funct_species_fig, width = 18, height = 12, units = "in", dpi = 440) 
+
+sig_species_table <- sig_results_funct_species %>% as.data.frame()
+write.csv(sig_species_table, "maaslin3_sig_func_species_table.csv", row.names = F)
+ 
+abundance_results_func %>% filter(metadata == "Location_Type" & !is.na(qval_individual) & qval_individual < 0.05 & coef > 0) %>% nrow() #33
+abundance_results_func %>% filter(metadata == "Location_Type" & !is.na(qval_individual) & qval_individual < 0.05 & coef < 0) %>% nrow() #4
+
+sig_results_funct_loc$direction_of_effect <- ifelse(sig_results_funct_loc$coef > 0, "Higher than Breeding Group", "Lower than Breeding Group")
+write.csv(sig_results_funct_loc, "sig_results_loc.csv", row.names = F)
+```
+#2.3. Differential abundance of metabolites across two species
+```{r}
+metabolite_matrix <- t(metab_pareto)
+head(metabolite_matrix)
+#add the metadata variables of interest 
+metab_metadata <- read.csv("limma_metab_metadata_for_metabolites.csv")
+head(metab_metadata)
+metab_metadata$Species <- factor(metab_metadata$Species, levels = c("SC", "SB"))
+metab_metadata$Species <- relevel(metab_metadata$Species, ref = "SB")
+levels(metab_metadata$Species)
+#add the updated enclosure and location
+metabolite_matrix_check <- metabolite_matrix[, which(colnames(metabolite_matrix) %in% metab_metadata$SampleName) ]
+ncol(metabolite_matrix_check) == nrow(metab_metadata)
+#order metab_metadata according to the metab matrix 
+metab_metadata <- metab_metadata[match(colnames(metabolite_matrix_check), metab_metadata$SampleName), ]
+all(colnames(metabolite_matrix_check) == metab_metadata$normalized_name)
+
+design <- model.matrix( ~ Species + Age  + Sex + Location_Type + enclosure,  data = metab_metadata)
+# Now:
+# rows = metabolites
+# columns = samples
+
+fit <- lmFit(metabolite_matrix_check, design)
+fit <- eBayes(fit)
+summary(fit)
+species_res <- topTable(fit, coef = "SpeciesSC", number = Inf, adjust.method = "BH")
+
+species_res$significant <- ifelse(species_res$adj.P.Val < 0.05, "significant", "ns")
+species_res %>% filter(significant == "significant") %>% as.data.frame()
+
+ggplot(species_res, aes(x = logFC,   y = -log10(adj.P.Val), color = significant)) + geom_hline(yintercept = 1.3, linetype = "dotted", color = "maroon") +
+  geom_point(alpha = 0.75) + theme_pubr(base_size = 24) + scale_color_manual(values = c("lightblue","coral"),  name = "qval_joint < 0.05") +
+  labs(x = "LogFC", y = "-log10(FDR)", title = "differential metabolite abundance associations \n in SC") +  
+  theme(plot.title = element_text(hjust = 0.5))
+
+sig_species <- rownames(species_res)[species_res$adj.P.Val < 0.05]
+pheatmap(metabolite_matrix[sig, ], annotation_col = metab_metadata[, c("Species", "Sex", "Location_Type")]) #this is not working
+
+age_res <- topTable(fit, coef = "Age", number = Inf, adjust.method = "BH")
+head(age_res)
+age_res$significant <- ifelse(age_res$adj.P.Val < 0.05, "significant", "ns")
+
+ggplot(age_res, aes(x = logFC,   y = -log10(adj.P.Val), color = significant)) +
+  geom_point(alpha = 0.75, size = 4) + 
+  theme_pubr(base_size = 24) + scale_color_manual(values = c("coral", "lightblue"),  name = "pval_joint < 0.05") +
+  geom_hline(yintercept = 1.3, linetype = "dotted", color = "maroon") + theme(legend.position = "right") +
+  labs(x = "LogFC", y = "-log10(FDR)", title = "untargeted metabolite abundance \n associations (with age)") + theme(plot.title = element_text(hjust = 0.5)) 
+
+#save the sig age related data
+head(age_res)
+report_file_metab         <- age_res %>% filter(significant == T)  %>% as.data.frame()
+report_file_metab$feature <- rownames(report_file_metab)
+write.csv(report_file_metab, "limma_metab_table.csv", row.names = F)
+```
+
+#5. Differential abundance of pathways related to GBMs across the two species 
+```{r}
+func_mat_gbm           <- readRDS("sbol_gbm_data_for_maaslin3_Aug10.rds")
+maaslin_metadata       <- readRDS( "sbol_GBM_metadata_maaslin_Aug112926.RDS")
+head(maaslin_metadata)
+str(maaslin_metadata)
+table(maaslin_metadata$Sample)
+
+maaslin_output   <- maaslin3(input_data = func_mat_gbm,
+                           input_metadata = maaslin_metadata,
+                           output = 'maaslin_GBM_Aug10_all_covariates_abund_only', 
+                           formula = '~ Species + Age + Location_Type + enclosure + log_reads', 
+                           normalization = 'TSS',
+                           transform = 'LOG',
+                           max_significance = 0.1, evaluate_only = "abundance", warn_prevalence = F,
+                           max_pngs = 100,
+                           cores = 1,
+                           save_models = TRUE) 
+
+sig_gbms <- fread("maaslin_GBM_Aug10_all_covariates_abund_only/significant_results.tsv")
+
+#species specific features
+sp_feat <- sig_gbms$feature[sig_gbms$metadata == "Species"]
+#do TSS for the func mat pathways
+func_tss <- sweep(func_mat_gbm,1,rowSums(func_mat_gbm),"/")
+
+#pathway of interest
+pos                <- which(colnames(func_mat) == sp_feat[3]) #change number here 1-3 to get the plots
+pathway_tss <- func_tss[, pos]
+
+pseudo   <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+
+pathway_log2       <- log2(pathway_tss + pseudo)
+values             <- pathway_log2
+
+#create a plot for each of these features now
+sampleid           <- rownames(func_mat)
+temp_data          <- as.data.frame(cbind(sampleid, values))
+temp_data$species  <- maaslin_metadata$Species[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$values   <- as.numeric(temp_data$values)
+temp_data$age      <- maaslin_metadata$Age[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$sex      <- maaslin_metadata$Sex[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group  <- maaslin_metadata$Age_group1[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group2 <- maaslin_metadata$Age_Group[match(temp_data$sampleid, maaslin_metadata$Sample)]
+
+str(temp_data)
+head(temp_data)
+which(is.na(temp_data$species))
+hist(temp_data$values)
+temp_data <- temp_data %>% filter(!is.na(species)) %>% as.data.frame()
+
+#temp_data <- temp_data %>% dplyr::filter(values > 0) %>% as.data.frame()
+gbm      <- lm(values ~ species + age, data = temp_data)
+summary(gbm)
+
+estradiol <- temp_data %>%  ggplot(aes(x = species, y = values,  color = species)) + geom_boxplot() + 
+  geom_jitter(alpha = 0.6, size = 4) + xlab("") + theme_pubr(base_size = 24) + theme(legend.position = "right", axis.text.x = element_blank(),plot.title = element_text(hjust = 0.5)) +    
+  scale_color_bmj() + ylab("pathway abundance \n  (TSS normalized:log2 transformed)") + xlab("")  +  ggtitle(sp_feat[1])  + xlab(" ") + 
+  geom_signif(comparisons = list(c("SB", "SC")), map_signif_level = TRUE, color = "black",  test = "wilcox.test", step_increase = 0.1 )
+
+glutamate <- temp_data %>%  ggplot(aes(x = species, y = values,  color = species)) + geom_boxplot() + 
+  geom_jitter(alpha = 0.6, size = 4) + xlab("") + theme_pubr(base_size = 24) + theme(legend.position = "right", axis.text.x = element_blank(), plot.title = element_text(hjust = 0.5)) +    
+  scale_color_bmj() + ylab(" ") + xlab("")  +  ggtitle(sp_feat[2])  + xlab(" ") + 
+  geom_signif(comparisons = list(c("SB", "SC")), map_signif_level = TRUE, color = "black",  test = "wilcox.test", step_increase = 0.1 )
+
+quinol <- temp_data %>%  ggplot(aes(x = species, y = values,  color = species)) + geom_boxplot() + 
+  geom_jitter(alpha = 0.6, size = 4) + xlab("") + theme_pubr(base_size = 24) + theme(legend.position = "right", axis.text.x = element_blank(), plot.title = element_text(hjust = 0.5)) +    
+  scale_color_bmj() + ylab(" ") + xlab("")  +  ggtitle(sp_feat[3])  + xlab(" ") + 
+  geom_signif(comparisons = list(c("SB", "SC")), map_signif_level = TRUE, color = "black",  test = "wilcox.test", step_increase = 0.1 )
+
+estradiol | quinol | glutamate #Fig 5 species GBM differences
+
+```
+
+#6. Age specific patterns in boliviensis only. Modeling taxonomic and functional shannon diversity GAMs. 
+```{r}
+boliv_color <- c("#2A6EBBFF")
+str(shotgun_metadata)
+#Age related patterns in the taxonomic composition and functional pathway diversity (shannon diversity)
+shotgun_metadata$Species       <- factor(shotgun_metadata$Species)
+shotgun_metadata$Sex           <- factor(shotgun_metadata$Sex)
+shotgun_metadata$asv_log_reads <- log(shotgun_metadata$asv_reads)
+
+m_linear <- gam(otu_shannon ~  Age + Sex + enclosure + Location_Type, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "REML")
+m_smooth <- gam(otu_shannon ~  s(Age) + Sex + enclosure + Location_Type, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "REML")
+
+anova(m_linear, m_smooth, test = "F")
+summary(m_smooth)
+
+AIC(m_linear, m_smooth)
+hist(shotgun_metadata$otu_shannon)
+
+#no non-linear effect of age 
+g0 <- gam(otu_shannon ~ s(Age), data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+g1 <- gam(otu_shannon ~ s(Age) +  Sex +  Location_Type + enclosure, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+g2 <- gam(otu_shannon ~ s(Age) +  Sex +  enclosure, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+g3 <- gam(otu_shannon ~ s(Age) +  Sex +  Location_Type, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+g4 <- gam(otu_shannon ~ s(Age) +  Sex , data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+
+bbmle::AICctab(g0, g1, g2, g3,g4,  weights = T, base = T) #g0 and g2 was best model 
+summary(g0)
+
+final_asv_shannon <- gam(otu_shannon ~ s(Age),data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "REML")
+summary(final_asv_shannon)
+
+newdat            <- expand.grid(Age = seq(min(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm=TRUE),
+                                max(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm=TRUE),length.out = 100))
+pred              <- predict(g0, newdata = newdat, se.fit = TRUE)
+
+newdat$fit        <- pred$fit
+newdat$se         <- pred$se.fit
+newdat$upper      <- newdat$fit + 1.96 * newdat$se
+newdat$lower      <- newdat$fit - 1.96 * newdat$se
+
+#plot smooth aging curves
+fig3.a <- shotgun_metadata %>% filter(Species == "SB") %>% ggplot() + geom_point(aes(x = Age, y = otu_shannon, color= boliv_color) , alpha = 0.4) +
+        geom_line(data = newdat, aes(x = Age, y = fit, color= boliv_color) , size = 2, col = "black") + 
+        geom_ribbon(data = newdat, aes(x = Age, ymin = lower, ymax = upper), alpha = 0.3, color = "black", linewidth = 0.4) + 
+        scale_fill_manual(values = boliv_color, name = NULL) +
+        theme_pubr(base_size = 24) + scale_color_manual(values = boliv_color, name = NULL) +
+        labs(x = "", y = "Shannon Diversity \n of ASVs") + guides(color = "none") 
+fig3.a
+
+#doing the same for richness now
+m_rich_linear <- gam(otu_richness ~ Species + Age + Sex + enclosure + Location_Type, data = shotgun_metadata, method = "REML")
+m_rich_smooth <- gam(otu_richness ~ Species + s(Age) + Sex + enclosure + Location_Type, data = shotgun_metadata, method = "REML")
+
+AIC(m_rich_linear, m_rich_smooth) #no need for smooth term for age
+
+#no non-linear effect of age 
+r0 <- gam(otu_richness ~ s(Age), data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+r1 <- gam(otu_richness ~ s(Age) +  Sex +  Location_Type + enclosure, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+r2 <- gam(otu_richness ~ s(Age) +  Sex +  enclosure, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+r3 <- gam(otu_richness ~ s(Age) +  Sex +  Location_Type, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+
+bbmle::AICctab(r0, r1, r2, r3, weights = T, base = T) #r0 and r2 was best model 
+summary(r0)
+
+final_asv_richness <- gam(otu_richness ~ s(Age),
+          data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "REML")
+summary(final_asv_richness)
+
+newdat2 <- expand.grid(Age = seq(min(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm=TRUE),
+            max(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm=TRUE), length.out=100))
+
+pred2 <- predict(r0, newdata = newdat2, se.fit = TRUE)
+
+newdat2$fit <- pred2$fit
+newdat2$se  <- pred2$se.fit
+newdat2$upper <- newdat2$fit + 1.96 * newdat2$se
+newdat2$lower <- newdat2$fit - 1.96 * newdat2$se
+
+#plot smooth aging curves
+fig3.b <- ggplot() + geom_point(data = shotgun_metadata[shotgun_metadata$Species == "SB",], aes(x = Age, y = otu_richness),
+             alpha = 0.4, color = boliv_color) +
+  geom_line(data = newdat2, aes(x = Age, y = fit, color = boliv_color) , size = 2, col = "black") + 
+  geom_ribbon(data = newdat2, aes(x = Age, ymin = lower, ymax = upper),alpha = 0.3, color = "black", linewidth = 0.4) + scale_fill_manual(values = boliv_color, name = NULL) +
+  theme_pubr(base_size = 24) + scale_color_manual(values = boliv_color, name = NULL) +
+  labs(x = "Age (years)", y = "Observed ASVs", ) + labs(color = NULL, ) + ylim(c(100,500)) + guides(color = "none")
+
+fig3 <- fig3.a / fig3.b
+fig3
+
+#GAMs for functional data Naive social groups
+#shannon diversity
+m_linear <- gam(shannon ~  Age + Sex + enclosure + Location_Type, data = shotgun_metadata[shotgun_metadata$Species == "SB",],method = "REML")
+m_smooth <- gam(shannon ~  s(Age) + Sex + enclosure + Location_Type, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "REML")
+
+anova(m_linear, m_smooth, test = "F")
+
+AIC(m_linear, m_smooth)#, Species, bs = "fs"
+
+sh0 <- gam(shannon ~ s(Age) , data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+sh1 <- gam(shannon ~ s(Age) + Sex  + Location_Type, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+sh2 <- gam(shannon ~ s(Age) + Sex + enclosure + Location_Type  , data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+sh3 <- gam(shannon ~ s(Age) + Sex + enclosure , data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+
+bbmle::AICctab(sh0, sh1, sh2, sh3, weights = T, base = T)
+summary(sh1)
+newdat3 <- expand.grid( Age = seq(min(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm = TRUE),
+            max(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm = TRUE),
+            length.out = 100), Sex = "F",  Location_Type  = "Naïve social group")
+
+pred <- predict(sh1, newdata = newdat3, se.fit = TRUE)
+shotgun_metadata$Location_Type
+newdat3$fit <- pred$fit
+newdat3$upper <- pred$fit + 1.96 * pred$se.fit
+newdat3$lower <- pred$fit - 1.96 * pred$se.fit
+
+fig3.b.1 <- ggplot() + geom_point(data = shotgun_metadata[shotgun_metadata$Species == "SB" & shotgun_metadata$Location_Type == "Naïve social group",], 
+                                  aes(x = Age, y = shannon, color = boliv_color), alpha = 0.4)  +
+  geom_line(data = newdat3, aes(x = Age, y = fit, color = boliv_color), size = 2, col = "black") + ylim(c(4.5,6.5)) +
+  geom_ribbon(data = newdat3, aes(x = Age, ymin = lower, ymax = upper, color = boliv_color), alpha = 0.3, color = "black", linewidth = 0.2) +
+  theme_pubr(base_size = 24) +
+  labs(x = " ", y = "Shannon diversity \n of functional pathways",  title = "Naive social groups") +
+  scale_color_manual(values = boliv_color, name = NULL)  + guides(color = "none") 
+
+fig3.b.1 
+colnames(shotgun_metadata)
+#do the same for number of obs pathways
+m_linear <- gam(observed_pathways_new ~ Species + Age + Sex + enclosure + Location_Type,data = shotgun_metadata,method = "REML")
+m_smooth <- gam(observed_pathways_new ~ Species + s(Age) + Sex + enclosure + Location_Type, data = shotgun_metadata, method = "REML")
+
+anova(m_linear, m_smooth, test = "F")
+
+AIC(m_linear, m_smooth)#, Species, bs = "fs"
+
+obs_path4 <- gam(observed_pathways_new ~ s(Age)  , data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+obs_path5 <- gam(observed_pathways_new ~ s(Age)  + Sex  + Location_Type, data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+obs_path6 <- gam(observed_pathways_new ~ s(Age)  + Sex + enclosure + Location_Type  , data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+obs_path7 <- gam(observed_pathways_new ~ s(Age)  + Sex + enclosure , data = shotgun_metadata[shotgun_metadata$Species == "SB",], method = "ML")
+
+bbmle::AICctab(obs_path4, obs_path5, obs_path6, obs_path7, weights = T, base = T)
+
+summary(obs_path6)
+
+newdat4 <- expand.grid(Age = seq(min(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm = TRUE),
+            max(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm = TRUE),
+            length.out = 100), Sex = "F", Location_Type = "Naïve social group", enclosure = "Large")
+
+pred <- predict(obs_path6, newdata = newdat4, se.fit = TRUE)
+
+newdat4$fit   <- pred$fit
+newdat4$upper <- pred$fit + 1.96 * pred$se.fit
+newdat4$lower <- pred$fit - 1.96 * pred$se.fit
+
+
+fig3.b.2 <- ggplot() + geom_point(data = shotgun_metadata[shotgun_metadata$Species == "SB" & shotgun_metadata$Location_Type == "Naïve social group" & shotgun_metadata$enclosure == "Large",], aes(x = Age, y = observed_pathways_new, color = boliv_color), alpha = 0.4) +
+  geom_line(data = newdat4, aes(x = Age, y = fit, color = boliv_color),size = 2, color = "black") +
+  geom_ribbon(data = newdat4, aes(x = Age, ymin = lower, ymax = upper, color = boliv_color), alpha = 0.3, color = "black", linewidth = 0.2) +
+  theme_pubr(base_size = 24) +  labs(x = "Age (years)", y = "Observed \n functional pathways", title = "Naive social groups") +  scale_color_manual(values = boliv_color, name = NULL) +
+  guides(color = "none") + ylim(c(100,500))
+
+fig3.b.2
+
+fig3.b.1 / fig3.b.2
+
+#next set of functional plots
+
+#change reference to treatment group next to see predicted plot
+newdat3 <- expand.grid( Age = seq(min(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm = TRUE),
+            max(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm = TRUE),
+            length.out = 100), Sex = "F",  Location_Type  = "Treatment group")
+
+pred <- predict(gam_model1, newdata = newdat3, se.fit = TRUE)
+
+newdat3$fit <- pred$fit
+newdat3$upper <- pred$fit + 1.96 * pred$se.fit
+newdat3$lower <- pred$fit - 1.96 * pred$se.fit
+
+fig3.b.12 <- ggplot() + geom_point(data = shotgun_metadata[shotgun_metadata$Species == "SB" & shotgun_metadata$Location_Type == "Treatment group",], aes(x = Age, y = shannon, color = boliv_color), alpha = 0.4)  +
+  geom_line(data = newdat3, aes(x = Age, y = fit, color = boliv_color), size = 2, col = "black") + ylim(c(4.5,6.5)) +
+  geom_ribbon(data = newdat3, aes(x = Age, ymin = lower, ymax = upper, color = boliv_color),
+    alpha = 0.3, color = "black", linewidth = 0.2) + theme_pubr(base_size = 24) +
+  labs(x = " ", y = "Shannon diversity \n of functional pathways", title = "Treatment group") +
+  scale_color_manual(values = boliv_color, name = NULL)  + guides(color = "none") 
+
+fig3.b.12
+
+newdat4 <- expand.grid(Age = seq(min(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm = TRUE),
+            max(shotgun_metadata$Age[shotgun_metadata$Species == "SB"], na.rm = TRUE),
+            length.out = 100), Sex = "F", Location_Type = "Treatment group", enclosure = "Large")
+
+pred <- predict(gam_model6, newdata = newdat4, se.fit = TRUE)
+
+newdat4$fit   <- pred$fit
+newdat4$upper <- pred$fit + 1.96 * pred$se.fit
+newdat4$lower <- pred$fit - 1.96 * pred$se.fit
+
+
+fig3.b.13 <- ggplot() + geom_point(data = shotgun_metadata[shotgun_metadata$Species == "SB" & shotgun_metadata$Location_Type == "Treatment group",], aes(x = Age, y = observed_pathways_new, color = boliv_color), alpha = 0.4) +
+  geom_line(data = newdat4, aes(x = Age, y = fit, color = boliv_color),size = 2, color = "black") +
+  geom_ribbon(data = newdat4, aes(x = Age, ymin = lower, ymax = upper, color = boliv_color), alpha = 0.3, color = "black", linewidth = 0.2) +
+  theme_pubr(base_size = 24) +  labs(x = "Age (years)", y = "Observed \n functional pathways", title = "Treatment group") +  scale_color_manual(values = boliv_color, name = NULL) +
+  guides(color = "none") + ylim(c(100,500))
+
+fig3.b.13
+
+
+fig3.b.12 / fig3.b.13
+
+#Relative abundances of butyrate, lactate and carbohydrate degrading taxa across age in Sb 
+df_genus_summ <- readRDS("sbol_genus_summ.RDS")
+head(df_genus_summ)
+table(df_genus_summ$Genus, df_genus_summ$sample.id)
+str(df_genus_summ)
+
+#make plots of genus categories across age
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$genus_cat == "Butyrate producers"& df_genus_summ$Species == "SB"] ~ df_genus_summ$Age[df_genus_summ$genus_cat == "Butyrate producers"& df_genus_summ$Species == "SB"]))
+     
+fig3.a <- df_genus_summ %>% filter(genus_cat == "Butyrate producers" & Species == "SB") %>% ggplot(aes(x = Age, y = log1p(Sum_abund + 1e-6), color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm", color = "gray2") + scale_color_manual(values = boliv_color, name = NULL) + theme_pubr(base_size = 24)  + theme(legend.position = "none") + ylab("Relative abundance") +  ggtitle("butyrate producing taxa")
+
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$genus_cat == "Lactate producers"& df_genus_summ$Species == "SB"] ~ df_genus_summ$Age[df_genus_summ$genus_cat == "Lactate producers"& df_genus_summ$Species == "SB"]))
+           
+fig3.b <- df_genus_summ %>% filter(genus_cat == "Lactate producers"& Species == "SB") %>% ggplot(aes(x = Age, y = log1p(Sum_abund + 1e-6), color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm", color = "gray2") + scale_color_manual(values = boliv_color, name = NULL) + theme_pubr(base_size = 24)  + theme(legend.position = "none") + ylab(" ") + ggtitle("lactate producing taxa")
+
+confint(lm(df_genus_summ$Sum_abund[df_genus_summ$genus_cat == "Carbohydrate degraders"& df_genus_summ$Species == "SB"] ~ df_genus_summ$Age[df_genus_summ$genus_cat == "Carbohydrate degraders"& df_genus_summ$Species == "SB"]))
+
+fig3.c <- df_genus_summ %>% filter(genus_cat == "Carbohydrate degraders" & Species == "SB") %>% ggplot(aes(x = Age, y = log1p(Sum_abund + 1e-6), color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm", color = "gray2") + scale_color_manual(values = boliv_color, name = NULL) + theme_pubr(base_size = 24)  + theme(legend.position = "none") + ylab("Relative abundance") + ylab("  ") + ggtitle("carbohydrate degrading taxa")
+
+benefic_microbes <- plot_grid(fig3.a, fig3.b, fig3.c, ncol = 3)
+
+ggsave("fig6C_subplot_benefic_microbes.jpeg", benefic_microbes,  height = 8, width= 19, dpi = 450)
+```
+
+#7. Differential abundance of pathways in Sb only 
+```{r}
+boliviensis_pathway_metadata <- readRDS("sbol_pathway_metadata_maaslinSBonly.RDS")
+boliviensis_pathway_metadata <- boliviensis_pathway_metadata %>% filter(Location_Type != "Individual") %>% as.data.frame()
+table(boliviensis_pathway_metadata$Location_Type) 
+
+#age, sex, loc and enclosure only
+fit_funct_boliviensis <- maaslin3(input_data = filtered_pathway,
+                                          input_metadata = boliviensis_pathway_metadata,
+                                          output = "maaslin3_pathway_SB_bothabunprev_all_Aug11",
+                                          formula  = "~ Age + Sex + Location_Type + enclosure", 
+                                          normalization = "TSS", 
+                                          transform = "LOG",
+                                          standardize = FALSE, 
+                                          max_significance = 0.1,
+                                          max_pngs = 100,
+                                          cores = 1, 
+                                          save_models = TRUE)
+
+
+results_path          <- read.delim("maaslin3_pathway_SB_bothabunprev_all_Aug11/all_results.tsv") 
+sb_abundance_results_func <- subset(results_path, model == "abundance")
+sb_abundance_results_func$log_qval_individual <- -log10(sb_abundance_results_func$qval_individual)
+sb_abundance_results_func$color <- ifelse(sb_abundance_results_func$coef < 0 , "lower with age", "higher with age")
+#Optional: keep significant hits only
+sb_sig_results_funct      <- sb_abundance_results_func %>% filter(qval_joint < 0.05)
+head(sb_sig_results_funct)
+sort(sb_sig_results_funct$feature)
+#rename pathways
+sb_sig_results_funct$PathwayID   <- str_remove(sb_sig_results_funct$feature, ":.*")
+sb_sig_results_funct$PathwayName <- pathway_name_map[sb_sig_results_funct$PathwayID]
+
+sb_sig_results_funct %>% filter(metadata == "Location_Type" & !is.na(qval_individual) & qval_individual < 0.05 ) %>% nrow() #4
+sb_sig_results_funct %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05  ) %>% nrow() #73
+sb_sig_results_funct %>% filter(metadata == "enclosure" & !is.na(qval_individual) & qval_individual < 0.05  ) %>% nrow() #49
+
+sb_sig_results_funct_age         <- sb_sig_results_funct %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05) %>% as.data.frame()  
+sb_sig_results_funct_loc         <- sb_sig_results_funct %>% filter(metadata == "Location_Type" & !is.na(qval_individual) & qval_individual < 0.05) %>% as.data.frame() #3 pathways
+
+#Reorder by coefficient size
+sb_sig_results_funct_age$color    <- ifelse(sb_sig_results_funct_age$coef < 0, "lower with age", "higher with age")
+sb_sig_results_funct_age          <- sb_sig_results_funct_age %>% arrange(coef) %>% as.data.frame()
+sb_sig_results_funct_age$color    <- factor(sb_sig_results_funct_age$color, level = c("lower with age", "higher with age"))
+
+
+sb_sig_results_funct %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05  & coef < 0) %>% nrow() #3
+sb_sig_results_funct %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05  & coef > 0) %>% nrow() #70
+
+
+#Plot only sig # do separate for  "Age"
+sb_sig_results_funct_age_fig <- sb_sig_results_funct_age %>% filter(!is.na(qval_individual) & qval_individual < 0.05)  %>%  
+  ggplot(aes(x = coef, y = reorder(PathwayName, coef), fill = color)) + 
+  geom_col() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_fill_manual(values = c("coral","lightblue"),
+    name = "direction of effect") + 
+  labs(title = "Differentially abundant functional pathways with age in SB",
+    x = "Model coefficient (beta)",
+    y = "Pathway") +  theme_pubr(base_size = 22)  + theme(panel.grid.major.y = element_blank(), legend.position = "right")
+
+ggsave( "BMC_BioFig7.jpeg", sb_sig_results_funct_age_fig, width = 18, height = 24, units = "in", dpi = 440) 
+
+sb_sig_age_table <- sb_sig_results_funct_age %>% as.data.frame()
+write.csv(sb_sig_age_table, "maaslin3_sig_SB_age_table.csv", row.names = F)
+
+sb_abundance_results_func %>% filter(metadata == "Age" & !is.na(coef)) %>% ggplot(aes(x = coef, y = log_qval_individual, col = color)) +
+geom_jitter(size = 4, alpha = 0.75) + geom_hline(yintercept = 1.3, linetype = "dotted", color = "maroon") +
+  geom_vline(xintercept = 0,
+             linetype = "dashed") +  scale_fill_manual(values = c( "coral","lightblue"),  name = "qval_joint < 0.05") + 
+  theme_pubr(base_size = 24) +
+  labs( x = "Beta coefficient",
+    y = "-log10(q-value)",
+    title = "functional pathway abundance associations \n in SB with age") + theme(plot.title = element_text(hjust = 0.5))
+#how many higher or lower?
+
+abundance_results_func %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05 & coef > 0) %>% nrow() #49 
+abundance_results_func %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05 & coef < 0) %>% nrow() #2
+
+#plot the max ones? NO
+abundance_results_func %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05 ) %>% arrange(coef) #2
+
+
+##genus and SCFA plot
+genus_wide <- df_genus_summ %>%
+  dplyr::select(sample.id, Genus, Sum_abund) %>%
+  distinct() %>%
+  pivot_wider(names_from = Genus, values_from = Sum_abund, values_fill = 0) %>% as.data.frame()
+
+head(genus_wide)
+scfa_data <- df_genus_summ %>%
+  dplyr::select(sample.id, acetate, propionate, butyrate, isovalerate) %>%
+  distinct() %>% as.data.frame()
+
+genus_wide <- genus_wide %>% arrange(sample.id)
+scfa_data  <- scfa_data  %>% arrange(sample.id)
+all(genus_wide$sample.id == scfa_data$sample.id)
+
+#prepare matrices
+genus_mat <- genus_wide %>% dplyr::select(-sample.id)
+scfa_mat  <- scfa_data %>% dplyr::select(-sample.id)
+genus_mat <- log1p(genus_mat)
+
+cor_mat    <- cor(genus_mat, scfa_mat, method = "spearman", use = "pairwise.complete.obs")
+scfa_cols  <- c("acetate", "propionate", "butyrate", "isovalerate")
+genus_cols <- colnames(genus_mat)
+
+library(ComplexHeatmap)
+library(circlize)
+library(Hmisc)
+library(pheatmap)
+res <- rcorr(as.matrix(genus_mat), as.matrix(scfa_mat), type = "spearman")
+
+p_mat <- res$P[genus_cols, scfa_cols]
+p_adj <- matrix(p.adjust(p_mat, method = "fdr"), nrow = nrow(p_mat),dimnames = dimnames(p_mat))
+stars <- ifelse(p_adj < 0.001, "***",
+         ifelse(p_adj < 0.01,  "**",
+         ifelse(p_adj < 0.05,  "*", "")))
+
+pheatmap(cor_mat,  col = colorRampPalette(c("coral3", "white", "cyan3"))(100), cluster_rows = TRUE, cluster_cols  = FALSE, 
+        display_numbers = stars, number_color = "black", 
+         fontsize = 15 , fontsize_col = 18, fontsize_number = 8) #change this as per genus type
+
+
+row_ha <- rowAnnotation(
+  Species = df$Species,
+  col = list(
+    Species = c(
+      "Species1" = "#1b9e77",
+      "Species2" = "#d95f02",
+      "Species3" = "#7570b3"
+    )
+  )
+)
+
+#add info on genus here 
+SCFA_group        <- c("Faecalibacterium", "Anaerostipes", "Agathobaculum", "Ruminococcus","Gemmiger", "Fusicatenibacter")
+Facultative_group <- c("Streptococcus","Lactobacillus","Lactococcus","Staphylococcus","Moraxella")
+
+#Microbiome Quality Score = (Sum of SCFA producers) / (Sum of facultative/aerotolerant taxa)
+
+df_genus_SCFA           <- df_genus_summ %>% group_by(sample.id) %>% 
+                           filter(Genus %in% SCFA_group) %>% mutate(sum_of_SCFA = sum(Sum_abund)) %>% as.data.frame()
+
+df_genus_facultative    <- df_genus_summ %>% group_by(sample.id) %>% 
+                           filter(Genus %in% Facultative_group) %>% mutate(sum_of_facultative = sum(Sum_abund)) %>% as.data.frame() 
+
+#calculate the ratios in each sample 
+#proportion of SCFA producing genus 
+df_genus$sum_of_SCFA        <- ifelse(df_genus$Genus %in% SCFA_group, df_genus_SCFA$sum_of_SCFA[match(df_genus$sample.id,df_genus_SCFA$sample.id)], NA )
+df_genus$sum_of_facultative <- ifelse(df_genus$Genus %in% Facultative_group, df_genus_facultative$sum_of_facultative[match(df_genus$sample.id,df_genus_facultative$sample.id)], NA )
+
+df_genus$prop_SCFA         <- df_genus$Abundance/df_genus$sum_of_SCFA
+df_genus$prop_facultative  <- df_genus$Abundance/df_genus$sum_of_facultative
+df_genus$age_group         <- meta$group[match(df_genus$sample.id, meta$sample.id)]
+library(ggplot2)
+
+df_genus %>% filter(!is.na(prop_SCFA) & Abundance != 0) %>% ggplot(aes(x = age_group, y = prop_SCFA, col = age_group)) +
+  geom_violin() +
+  labs(title = "Beneficial Microbe Ratio Across Age Groups",
+       x = "Age Group",
+       y = "Ratio") + facet_grid(.~Species) +
+  ggpubr::theme_pubr(base_size = 18, base_family = "Avenir") 
+
+df_genus %>% filter(!is.na(prop_facultative) & Abundance != 0) %>% ggplot(aes(x = age_group, y = prop_facultative, col = age_group)) +
+  geom_boxplot() +
+  labs(title = "Facultative Microbe Ratio Across Age Groups",
+       x = "Age Group",
+       y = "Ratio") + facet_grid(.~Species) +
+  ggpubr::theme_pubr(base_size = 18, base_family = "Avenir") 
+
+anova_res <- aov(prop_facultative ~ age_group, data = df_genus)
+summary(anova_res)
+kruskal.test(ratio ~ age_group, data = df) 
+
+#pathogenic taxa - check 
+
+```
+
+#8.GBMs in Sb only across age
+```{r}
+#read in GBM map data
+func_mat_gbm           <- readRDS("sbol_gbm_data_for_maaslin3_Aug10.rds")
+maaslin_metadata       <- readRDS( "sbol_GBM_metadata_maaslin_Aug112926.RDS")
+head(maaslin_metadata)
+str(maaslin_metadata)
+table(maaslin_metadata$Sample)
+
+#differntial abundance with everything
+maaslin_output   <- maaslin3(input_data = func_mat_gbm,
+                           input_metadata = boliviensis_pathway_metadata,
+                           output = 'maaslin_GBM_Aug10_all_covariates_prevabund_SBonly', 
+                           formula = '~ Sex + Age + enclosure + Location_Type + log_reads', 
+                           normalization = 'TSS',
+                           transform = 'LOG',
+                           max_significance = 0.1, 
+                           max_pngs = 100,
+                           cores = 1,
+                           save_models = TRUE) 
+
+sig_gbms <- fread("maaslin_GBM_Aug10_all_covariates_prevabund_SBonly/significant_results.tsv")
+"Glutamate synthesis I"
+"Tryptophan synthesis" 
+"Acetate synthesis I/II/III"
+"Menaquinone synthesis (vitamin K2) II"
+
+#age specific features
+age_feat <- sig_gbms$feature[sig_gbms$metadata == "Age"]
+age_feat
+length(age_feat)
+age_gbm <- sig_gbms %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05 ) %>% as.data.frame() 
+
+sig_gbms %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05 & coef < 0 ) %>% as.data.frame() %>% nrow() #1 decrese with age
+sig_gbms %>% filter(metadata == "Age" & !is.na(qval_individual) & qval_individual < 0.05 & coef > 0 ) %>% as.data.frame() %>% nrow() #7 increase with age
+
+#pathway of interest
+pos                <- which(colnames(func_mat) == age_feat[1])
+pathway_tss <- func_tss[, pos]
+
+pseudo   <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+
+pathway_log2       <- log2(pathway_tss + pseudo)
+values             <- pathway_log2
+
+#create a plot for each of these features now
+sampleid           <- rownames(func_mat)
+temp_data          <- as.data.frame(cbind(sampleid, values))
+temp_data$species  <- maaslin_metadata$Species[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$values   <- as.numeric(temp_data$values)
+temp_data$age      <- maaslin_metadata$Age[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$sex      <- maaslin_metadata$Sex[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group<- maaslin_metadata$Age_group1[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group2 <- maaslin_metadata$Age_Group[match(temp_data$sampleid, maaslin_metadata$Sample)]
+
+gbm      <- lm(values ~ species + age, data = temp_data)
+summary(gbm)
+
+sam <- temp_data %>% filter(species == "SB") %>%  ggplot(aes(x = age, y = values, color = species)) + geom_point(size = 4, alpha = 0.6) + geom_smooth(method = "lm") + theme_pubr(base_size = 24) + theme(legend.position = "right") + scale_color_manual(values = boliv_color, name = NULL) + ylab("\n pathway abundance \n  (TSS normalized:log2 transformed)") + xlab("")  +  ggtitle(age_feat[1])  + xlab("Age in years") + theme(legend.position = "none")
+
+#pathway of interest
+pos                <- which(colnames(func_mat) == age_feat[2])
+pathway_tss <- func_tss[, pos]
+
+pseudo   <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+
+pathway_log2       <- log2(pathway_tss + pseudo)
+values             <- pathway_log2
+
+#create a plot for each of these features now
+sampleid           <- rownames(func_mat)
+temp_data          <- as.data.frame(cbind(sampleid, values))
+temp_data$species  <- maaslin_metadata$Species[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$values   <- as.numeric(temp_data$values)
+temp_data$age      <- maaslin_metadata$Age[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$sex      <- maaslin_metadata$Sex[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group<- maaslin_metadata$Age_group1[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group2 <- maaslin_metadata$Age_Group[match(temp_data$sampleid, maaslin_metadata$Sample)]
+
+gbm      <- lm(values ~ species + age, data = temp_data)
+summary(gbm)
+
+tryp <- temp_data %>% filter(species == "SB") %>%  ggplot(aes(x = age, y = values, color = species)) + geom_point(size = 4, alpha = 0.6) + geom_smooth(method = "lm") + theme_pubr(base_size = 24) + theme(legend.position = "right") + scale_color_manual(values = boliv_color, name = NULL) + ylab("\n pathway abundance \n  (TSS normalized:log2 transformed)") + xlab("")  +  ggtitle(age_feat[2])  + xlab("Age in years") + theme(legend.position = "none")
+
+#pathway of interest
+pos                <- which(colnames(func_mat) == age_feat[3])
+pathway_tss <- func_tss[, pos]
+
+pseudo   <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+
+pathway_log2       <- log2(pathway_tss + pseudo)
+values             <- pathway_log2
+
+#create a plot for each of these features now
+sampleid           <- rownames(func_mat)
+temp_data          <- as.data.frame(cbind(sampleid, values))
+temp_data$species  <- maaslin_metadata$Species[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$values   <- as.numeric(temp_data$values)
+temp_data$age      <- maaslin_metadata$Age[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$sex      <- maaslin_metadata$Sex[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group<- maaslin_metadata$Age_group1[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group2 <- maaslin_metadata$Age_Group[match(temp_data$sampleid, maaslin_metadata$Sample)]
+
+gbm      <- lm(values ~ species + age, data = temp_data)
+summary(gbm)
+
+acet <- temp_data %>% filter(species == "SB") %>%  ggplot(aes(x = age, y = values, color = species)) + geom_point(size = 4, alpha = 0.6) + geom_smooth(method = "lm") + theme_pubr(base_size = 24) + theme(legend.position = "right") + scale_color_manual(values = boliv_color, name = NULL) + ylab("\n pathway abundance \n  (TSS normalized:log2 transformed)") + xlab("")  +  ggtitle(age_feat[3])  + xlab("Age in years") + theme(legend.position = "none")
+
+
+#pathway of interest
+pos                <- which(colnames(func_mat) == age_feat[4])
+pathway_tss <- func_tss[, pos]
+
+pseudo   <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+
+pathway_log2       <- log2(pathway_tss + pseudo)
+values             <- pathway_log2
+
+#create a plot for each of these features now
+sampleid           <- rownames(func_mat)
+temp_data          <- as.data.frame(cbind(sampleid, values))
+temp_data$species  <- maaslin_metadata$Species[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$values   <- as.numeric(temp_data$values)
+temp_data$age      <- maaslin_metadata$Age[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$sex      <- maaslin_metadata$Sex[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group<- maaslin_metadata$Age_group1[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group2 <- maaslin_metadata$Age_Group[match(temp_data$sampleid, maaslin_metadata$Sample)]
+
+gbm      <- lm(values ~ species + age, data = temp_data)
+summary(gbm)
+
+acet2 <- temp_data %>% filter(species == "SB") %>%  ggplot(aes(x = age, y = values, color = species)) + geom_point(size = 4, alpha = 0.6) + geom_smooth(method = "lm") + theme_pubr(base_size = 24) + theme(legend.position = "right") + scale_color_manual(values = boliv_color, name = NULL) + ylab("\n pathway abundance \n  (TSS normalized:log2 transformed)") + xlab("")  +  ggtitle(age_feat[4])  + xlab("Age in years") + theme(legend.position = "none")
+
+#pathway of interest
+pos                <- which(colnames(func_mat) == age_feat[5])
+pathway_tss <- func_tss[, pos]
+
+pseudo   <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+
+pathway_log2       <- log2(pathway_tss + pseudo)
+values             <- pathway_log2
+
+#create a plot for each of these features now
+sampleid           <- rownames(func_mat)
+temp_data          <- as.data.frame(cbind(sampleid, values))
+temp_data$species  <- maaslin_metadata$Species[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$values   <- as.numeric(temp_data$values)
+temp_data$age      <- maaslin_metadata$Age[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$sex      <- maaslin_metadata$Sex[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group<- maaslin_metadata$Age_group1[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group2 <- maaslin_metadata$Age_Group[match(temp_data$sampleid, maaslin_metadata$Sample)]
+
+gbm      <- lm(values ~ species + age, data = temp_data)
+summary(gbm)
+
+glut <- temp_data %>% filter(species == "SB") %>%  ggplot(aes(x = age, y = values, color = species)) + geom_point(size = 4, alpha = 0.6) + geom_smooth(method = "lm") + theme_pubr(base_size = 24) + theme(legend.position = "right") + scale_color_manual(values = boliv_color, name = NULL) + ylab("\n pathway abundance \n  (TSS normalized:log2 transformed)") + xlab("")  +  ggtitle(age_feat[5])  + xlab("Age in years") + theme(legend.position = "none")
+
+#pathway of interest
+pos                <- which(colnames(func_mat) == age_feat[6])
+pathway_tss <- func_tss[, pos]
+
+pseudo   <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+
+pathway_log2       <- log2(pathway_tss + pseudo)
+values             <- pathway_log2
+
+#create a plot for each of these features now
+sampleid           <- rownames(func_mat)
+temp_data          <- as.data.frame(cbind(sampleid, values))
+temp_data$species  <- maaslin_metadata$Species[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$values   <- as.numeric(temp_data$values)
+temp_data$age      <- maaslin_metadata$Age[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$sex      <- maaslin_metadata$Sex[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group<- maaslin_metadata$Age_group1[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group2 <- maaslin_metadata$Age_Group[match(temp_data$sampleid, maaslin_metadata$Sample)]
+
+gbm      <- lm(values ~ species + age, data = temp_data)
+summary(gbm)
+
+ino <- temp_data %>% filter(species == "SB") %>%  ggplot(aes(x = age, y = values, color = species)) + geom_point(size = 4, alpha = 0.6) + geom_smooth(method = "lm") + theme_pubr(base_size = 24) + theme(legend.position = "right") + scale_color_manual(values = boliv_color, name = NULL) + ylab("\n pathway abundance \n  (TSS normalized:log2 transformed)") + xlab("")  +  ggtitle(age_feat[6])  + xlab("Age in years") + theme(legend.position = "none")
+
+#pathway of interest
+pos                <- which(colnames(func_mat) == age_feat[7])
+pathway_tss <- func_tss[, pos]
+
+pseudo   <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+
+pathway_log2       <- log2(pathway_tss + pseudo)
+values             <- pathway_log2
+
+#create a plot for each of these features now
+sampleid           <- rownames(func_mat)
+temp_data          <- as.data.frame(cbind(sampleid, values))
+temp_data$species  <- maaslin_metadata$Species[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$values   <- as.numeric(temp_data$values)
+temp_data$age      <- maaslin_metadata$Age[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$sex      <- maaslin_metadata$Sex[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group<- maaslin_metadata$Age_group1[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group2 <- maaslin_metadata$Age_Group[match(temp_data$sampleid, maaslin_metadata$Sample)]
+
+gbm      <- lm(values ~ species + age, data = temp_data)
+summary(gbm)
+
+vitk <- temp_data %>% filter(species == "SB") %>%  ggplot(aes(x = age, y = values, color = species)) + geom_point(size = 4, alpha = 0.6) + geom_smooth(method = "lm") + theme_pubr(base_size = 24) + theme(legend.position = "right") + scale_color_manual(values = boliv_color, name = NULL) + ylab("\n pathway abundance \n  (TSS normalized:log2 transformed)") + xlab("")  +  ggtitle(age_feat[7])  + xlab("Age in years") + theme(legend.position = "none")
+
+
+#pathway of interest
+pos                <- which(colnames(func_mat) == age_feat[8])
+pathway_tss <- func_tss[, pos]
+
+pseudo   <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+
+pathway_log2       <- log2(pathway_tss + pseudo)
+values             <- pathway_log2
+
+#create a plot for each of these features now
+sampleid           <- rownames(func_mat)
+temp_data          <- as.data.frame(cbind(sampleid, values))
+temp_data$species  <- maaslin_metadata$Species[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$values   <- as.numeric(temp_data$values)
+temp_data$age      <- maaslin_metadata$Age[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$sex      <- maaslin_metadata$Sex[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group<- maaslin_metadata$Age_group1[match(temp_data$sampleid, maaslin_metadata$Sample)]
+temp_data$age_group2 <- maaslin_metadata$Age_Group[match(temp_data$sampleid, maaslin_metadata$Sample)]
+
+gbm      <- lm(values ~ species + age, data = temp_data)
+summary(gbm)
+
+acet3 <- temp_data %>% filter(species == "SB") %>%  ggplot(aes(x = age, y = values, color = species)) + geom_point(size = 4, alpha = 0.6) + geom_smooth(method = "lm") + theme_pubr(base_size = 24) + theme(legend.position = "right") + scale_color_manual(values = boliv_color, name = NULL) + ylab("\n pathway abundance \n  (TSS normalized:log2 transformed)") + xlab("")  +  ggtitle(age_feat[8])  + xlab("Age in years") + theme(legend.position = "none")
+
+age_gbm_fig <- plot_grid(acet, tryp, glut, sam, ino, vitk, ncol = 3, nrow = 2)
+
+jpeg("BMC_BioFig8.jpeg", width = 70, height = 34, res = 450, units = "cm")
+age_gbm_fig
+dev.off()
+#which are the ones differentially abundant 
+sig_GBMs <- read.csv("/Users/sharmisen/Desktop/POSTDOC PROJECTS/NORTHWESTERN/Squirrel Monkey Project/GBM_pathways_associations.csv")
+head(sig_GBMs)
+#subset to those only
+func_mat <- func_mat[func_mat$ModuleName %in% sig_GBMs$feature,]
+
+table(colnames(func_mat))
+which(func_mat_t$sample.id == 6524) #6524 is repeated twice - remove 
+func_mat_t               <- func_mat_t[-c(69,99),] 
+rownames(func_mat_t)     <- func_mat_t$sample.id
+func_mat_t               <- func_mat_t %>% dplyr::select(-sample.id)
+func_mat_t_num           <- apply(func_mat_t, 2, as.numeric)
+rownames(func_mat_t_num) <- rownames(func_mat_t)
+func_clr <- clr(func_mat_t_num + 1e-6)   # transform abundances
+which(rownames(func_clr) %!in% meta_func$Animal)
+meta_func_ordered <- meta_func[match(as.numeric(rownames(func_clr)),meta_func$Animal),]
+
+surv_obj <- Surv(time = meta_func_ordered$time, event = meta_func_ordered$status)
+
+#univariate cox model for each functional pathway
+results <- data.frame()
+
+for (feature in colnames(func_clr)) {
+  values <- as.numeric(func_mat_t[, feature] )
+  model <- coxph(surv_obj ~ values + Age_group1 + Sex + Species ,
+                 data = meta_func_ordered)
+  s <- summary(model)
+  results <- rbind(results, data.frame(
+    feature = feature,
+    HR = s$coef[1, "exp(coef)"],
+    pval = s$coef[1, "Pr(>|z|)"]
+  ))
+}
+
+results$padj <- p.adjust(results$pval, method = "fdr")
+
+ 
+pca <- prcomp(func_clr, scale. = TRUE)
+
+meta_func_ordered$PC1 <- pca$x[,1]
+meta_func_ordered$PC2 <- pca$x[,2]
+surv_obj <- Surv(time = meta_func_ordered$time, event = meta_func_ordered$status)
+
+cox_model <- coxph(surv_obj ~ PC1 + PC2 + Age_group1 + Sex * Species ,
+                   data = meta_func_ordered)
+summary(cox_model)
+
+library(survminer)
+
+#example: split PC1 at median
+meta_func_ordered$PC1_group <- ifelse(meta_func_ordered$PC1 > median(meta_func_ordered$PC1), "High", "Low")
+meta_func_ordered$PC2_group <- ifelse(meta_func_ordered$PC2 > median(meta_func_ordered$PC1), "High", "Low")
+
+fit <- survfit(surv_obj ~ PC2_group, data = meta_func_ordered)
+
+ggsurvplot(fit, data = meta_func_ordered, pval = TRUE)
+meta_func_ordered_adults <- meta_func_ordered %>% filter(Age_group1 %in% c("Adult", "Geriatric", "Geriatric_old")) %>% as.data.frame()
+
+surv_obj <- Surv(time = meta_func_ordered_adults$time, event = meta_func_ordered_adults$status)
+
+fit      <- survfit(surv_obj ~ Age_group1, data = meta_func_ordered_adults)
+summary(fit)
+p <- ggsurvplot(fit, data = meta_func_ordered_adults, pval = TRUE,
+                palette = c("#CC79A7","purple3" ,"gray"), font.legend = 14, 
+                legend.position = "none",
+                size = 1.5)
+p 
+
+fit      <- survfit(surv_obj ~ Species, data = meta_func_ordered_adults)
+
+p1 <- ggsurvplot(fit, data = meta_func_ordered_adults, pval = TRUE, 
+                 palette = c("yellow3","purple3"), font.legend = 14, legend.position = "none",
+                size = 1.5) 
+
+p1 
+
+```
+#9. SCFA models
+```{r}
+targeted_data <- shotgun_metadata
+#modeling the SCFA data
+head(targeted_data)
+#remove hospital and recovery from the targeted data 
+full_targeted_data <- targeted_data %>% filter(Location_Type != "Individual") %>% 
+                                        dplyr::select(Age , Sex, Species, Location_Type, enclosure, propionate, acetate, butyrate, valerate, total_SCFA) %>% 
+                                        mutate(prop_PA = propionate/total_SCFA, prop_BA = butyrate/total_SCFA, 
+                                               prop_AA = acetate/ total_SCFA, prop_VA = valerate/total_SCFA) %>% as.data.frame()
+
+#scale and standardize age_cont and weight variables 
+full_targeted_data$age_scaled  <- scale(full_targeted_data$Age)
+md.pattern(full_targeted_data)
+complete_targeted_data <- cc(full_targeted_data)
+complete_targeted_data <- complete_targeted_data %>% filter(Species == "SB") %>% as.data.frame()
+#modelling each SCFA metabolite separately without any other metabolite present
+
+#PA - propionate - setup a subset of models 
+pa.models0 <- glm(prop_PA ~ 1 , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+pa.models1 <- glm(prop_PA ~ enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+pa.models2 <- glm(prop_PA ~ age_scaled, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+pa.models3 <- glm(prop_PA ~ age_scaled + Location_Type, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+pa.models4 <- glm(prop_PA ~ age_scaled + Sex, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+pa.models5 <- glm(prop_PA ~ age_scaled + Sex  + Location_Type , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+pa.models6 <- glm(prop_PA ~ age_scaled + Sex  + Location_Type + enclosure , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+pa.models7 <- glm(prop_PA ~ age_scaled * Sex  + Location_Type , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail") 
+pa.models8 <- glm(prop_PA ~ age_scaled * Sex  + Location_Type + enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+
+#Put all models in a list
+pa_models <- list(pa.models0, pa.models1, pa.models2, pa.models3, pa.models4,pa.models5, pa.models6, pa.models7, pa.models8)
+#adding model names for clarity in the output
+model_names <- c("pa.models0","pa.models1", "pa.models2", "pa.models3", "pa.models4","pa.models5", "pa.models6", "pa.models7", "pa.models8")
+
+#Run aictab with weights
+AICtab(pa.models0, pa.models1, pa.models2, pa.models3, pa.models4,pa.models5, pa.models6, pa.models7, pa.models8, weights = TRUE, base = T)
+
+top_pa_models      <- list(pa.models2, pa.models4)
+top_pa_model_names <- c("pa.models2", "pa.models4")
+
+#Model averaging
+pa_ma <- model.avg(object =  top_pa_models, model_names = top_pa_model_names, second.ord = TRUE) # uses AICc weights
+
+#View averaged coefficients
+summary(pa_ma)
+
+#Full = TRUE includes predictors that aren't in all models
+coef_df <- as.data.frame(coef(pa_ma, full = FALSE))
+conf_df <- as.data.frame(confint(pa_ma, full = FALSE))
+
+#Combine into a single dataframe
+plot_df <- data.frame(Predictor = rownames(coef_df),
+  Estimate = coef_df$`coef(pa_ma, full = FALSE)`,
+  Lower = conf_df$`2.5 %`,
+  Upper = conf_df$`97.5 %`)
+
+# Optional: remove intercept if you want only predictors
+plot_df   <- plot_df[plot_df$Predictor != "(Intercept)", ]
+plot_df$Predictor <- c("Age", "Male")
+prop_plot <- ggplot(plot_df, aes(x = Predictor, y = Estimate)) +
+  geom_point(size = 6, color = "black") +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.05, color = "black") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray", linewidth = 2) + 
+  coord_flip() +  # flip for horizontal labels 
+  labs( y = " ", x = "", title = "Propionate") + theme_pubr(base_size = 24)
+
+prop_plot
+
+#butyrate - setup a subset of models 
+ba.models0         <-  glm(prop_BA ~ 1 , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+ba.models1         <-  glm(prop_BA ~ enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+ba.models2         <-  glm(prop_BA ~ age_scaled, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+ba.models3         <-  glm(prop_BA ~ age_scaled + Location_Type, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+ba.models4         <-  glm(prop_BA ~ age_scaled + Sex, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+ba.models5         <-  glm(prop_BA ~ age_scaled + Sex  + Location_Type + enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+ba.models6         <-  glm(prop_BA ~ age_scaled + Sex  + Location_Type , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+ba.models7         <-  glm(prop_BA ~ age_scaled * Sex  + Location_Type , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail") 
+ba.models8         <-  glm(prop_BA ~ age_scaled * Sex  + Location_Type + enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+
+#Put all models in a list
+ba_models          <- list(ba.models0, ba.models1, ba.models2, ba.models3, ba.models4,ba.models5, ba.models6, ba.models7, ba.models8)
+#adding model names for clarity in the output
+model_names        <- c("ba.models0","ba.models1", "ba.models2", "ba.models3", "ba.models4","ba.models5", "ba.models6", "ba.models7", "ba.models8")
+
+#Run aictab with weights
+AICtab(ba.models0, ba.models1, ba.models2, ba.models3, ba.models4,ba.models5, ba.models6, ba.models7, ba.models8,  weights = TRUE, base = T)
+
+top_ba_models       <- list(ba.models4, ba.models2)
+top_ba_model_names  <- c("ba.models4","ba.models2")
+
+#Model averaging
+ba_ma               <- model.avg(object =  top_ba_models, model_names = top_ba_model_names, second.ord = TRUE) # uses AICc weights
+
+#View averaged coefficients
+summary(ba_ma)
+
+#Full = TRUE includes predictors that aren't in all models
+coef_df             <- as.data.frame(coef(ba_ma, full = FALSE))
+conf_df             <- as.data.frame(confint(ba_ma, full = FALSE))
+
+#Combine into a single dataframe
+plot_df             <- data.frame(Predictor = rownames(coef_df), Estimate = coef_df$`coef(ba_ma, full = FALSE)`, Lower = conf_df$`2.5 %`, Upper = conf_df$`97.5 %`)
+
+#Optional: remove intercept if you want only predictors
+plot_df           <- plot_df[plot_df$Predictor != "(Intercept)", ]
+plot_df$Predictor <- c("Age", "Male")
+but_plot          <- ggplot(plot_df, aes(x = Predictor, y = Estimate)) + geom_point(size = 6, color = "black") +
+                                     geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.05, color = "black") +
+                                     geom_hline(yintercept = 0, linetype = "dashed", color = "gray", linewidth = 2) + 
+                                     coord_flip() +  # flip for horizontal labels 
+                                     labs( y = " ", x = "", title = "Butyrate") + theme_pubr(base_size = 24)
+but_plot
+
+#acetate - setup a subset of models
+aa.models0 <- glm(prop_AA ~ 1 , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+aa.models1 <- glm(prop_AA ~ enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+aa.models2 <- glm(prop_AA ~ age_scaled, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+aa.models3 <- glm(prop_AA ~ age_scaled + Location_Type, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+aa.models4 <- glm(prop_AA ~ age_scaled +  Sex, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+aa.models5 <- glm(prop_AA ~ age_scaled + Sex  + Location_Type + enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+aa.models6 <- glm(prop_AA ~ age_scaled + Sex  + Location_Type , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+aa.models7 <- glm(prop_AA ~ age_scaled * Sex  + enclosure + Location_Type , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail") 
+aa.models8 <- glm(prop_AA ~ age_scaled * Sex  + Location_Type , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+
+#Put all models in a list
+aa_models <- list(aa.models0, aa.models1, aa.models2, aa.models3, aa.models4,aa.models5, aa.models6, aa.models7, aa.models8)
+#adding model names for clarity in the output
+model_names <- c("aa.models0","aa.models1", "aa.models2", "aa.models3", "aa.models4","aa.models5", "aa.models6", "aa.models7", "aa.models8")
+
+#Run aictab with weights
+AICtab(aa.models0, aa.models1, aa.models2, aa.models3, aa.models4,aa.models5, aa.models6, aa.models7, aa.models8, weights = TRUE, base = TRUE)
+
+top_aa_models      <- list(aa.models4, aa.models2)
+top_aa_model_names <- c("aa.models4","aa.models2")
+
+#Model averaging
+aa_ma <- model.avg(object =  top_aa_models, model_names = top_aa_model_names, second.ord = TRUE) # uses AICc weights
+
+#View averaged coefficients
+summary(aa_ma)
+
+#Full = TRUE includes predictors that aren't in all models
+coef_df <- as.data.frame(coef(aa_ma, full = FALSE))
+conf_df <- as.data.frame(confint(aa_ma, full = FALSE))
+
+#Combine into a single dataframe
+plot_df <- data.frame(Predictor = rownames(coef_df),
+  Estimate = coef_df$`coef(aa_ma, full = FALSE)`,
+  Lower = conf_df$`2.5 %`,
+  Upper = conf_df$`97.5 %`)
+
+# Optional: remove intercept if you want only predictors
+plot_df <- plot_df[plot_df$Predictor != "(Intercept)", ]
+plot_df$Predictor <- c("Age", "Male")
+acet_plot <- ggplot(plot_df, aes(x = Predictor, y = Estimate)) +
+  geom_point(size = 6, color = "black") +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.05, color = "black")  +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray", linewidth = 2) + 
+  coord_flip() +  # flip for horizontal labels 
+  labs( y = "Model-averaged coefficient", x = "", title = "Acetate") + theme_pubr(base_size = 24)
+acet_plot
+
+#isovalerate
+#isovalerate - setup a subset of models 
+iVa.models0 <- glm(prop_VA ~ 1 , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+iVa.models1 <- glm(prop_VA ~ enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+iVa.models2 <- glm(prop_VA ~ age_scaled, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+iVa.models3 <- glm(prop_VA ~ age_scaled + enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+iVa.models4 <- glm(prop_VA ~ age_scaled + Sex, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+iVa.models5 <- glm(prop_VA ~ age_scaled + Sex + Location_Type , data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+iVa.models6 <- glm(prop_VA ~ age_scaled + Location_Type + enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+iVa.models7 <- glm(prop_VA ~ age_scaled + Sex + Location_Type + enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail") 
+iVa.models8 <- glm(prop_VA ~ age_scaled * Sex + Location_Type, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+iVa.models9 <- glm(prop_VA ~ age_scaled * Sex + enclosure, data = complete_targeted_data, family = Gamma(link = "log"), na.action = "na.fail")
+#Put all models in a list
+iVa_models <- list(iVa.models0, iVa.models1, iVa.models2, iVa.models3, iVa.models4,iVa.models5, iVa.models6, iVa.models7, iVa.models8, iVa.models9)
+#adding model names for clarity in the output
+model_names <- c("iVa.models0","iVa.models1", "iVa.models2", "iVa.models3", "iVa.models4","iVa.models5", "iVa.models6", "iVa.models7", "iVa.models8", "iVa.models9")
+
+#Run aictab with weights
+AICctab(iVa.models0, iVa.models1, iVa.models2, iVa.models3, iVa.models4,iVa.models5, iVa.models6, iVa.models7, iVa.models8, iVa.models9, weights = TRUE, base = T)
+
+top_va_models      <- list(iVa.models0, iVa.models4, iVa.models1)
+top_va_model_names <- c("iVa.models0","iVa.models4", "iVa.models1")
+
+#Model averaging
+iVa_ma <- model.avg(object =  top_va_models, model_names = top_va_model_names, second.ord = TRUE) # uses AICc weights
+
+#View averaged coefficients
+summary(iVa_ma)
+
+#Full = TRUE includes predictors that aren't in all models
+coef_df <- as.data.frame(coef(iVa_ma, full = FALSE))
+conf_df <- as.data.frame(confint(iVa_ma, full = FALSE))
+
+#Combine into a single dataframe
+plot_df <- data.frame(Predictor = rownames(coef_df),
+  Estimate = coef_df$`coef(iVa_ma, full = FALSE)`,
+  Lower = conf_df$`2.5 %`,
+  Upper = conf_df$`97.5 %`)
+
+# Optional: remove intercept if you want only predictors
+plot_df <- plot_df[plot_df$Predictor != "(Intercept)", ]
+plot_df$Predictor <- c("Age", "Male", "Small", "Medium", "Large")
+#plot_df <- plot_df[plot_df$Predictor != "Small enclosure",]
+
+iva_plot <- ggplot(plot_df, aes(x = Predictor, y = Estimate)) +
+  geom_point(size = 6, color = "black") +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.05, color = "black")  +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray", linewidth = 2) + 
+  coord_flip() +  # flip for horizontal labels 
+  labs( y = "Model-averaged coefficient", x = "", title = "isoValerate") + theme_pubr(base_size = 24)
+iva_plot 
+
+scfa_model_plot <- cowplot::plot_grid(prop_plot, but_plot, iva_plot , acet_plot, ncol = 2) #Fig 9
+#ggsave( "SCFA_models.png",scfa_model_plot, width = 18, height = 11, units = "in", dpi = 340)
+```
+
+#Differential Metabolites with age in Sb only
+```{r}
+#do it only for SB
+head(metadata)
+str(metadata)
+metadata$Age <- as.numeric(metadata$Age)
+metadata_SB_limma <- metadata %>% filter(Species == "SB") %>% as.data.frame()
+#filter by only the SB 
+metabolite_matrix_check_SB <- metabolite_matrix_check[,colnames( metabolite_matrix_check) %in% metadata_SB_limma$normalized_name]
+
+design <- model.matrix(~ Age + Sex + Location_Type + enclosure,
+  data = metadata_SB_limma)
+
+colnames(metabolite_matrix_check) 
+
+fit2 <- lmFit(metabolite_matrix_check_SB, design)
+fit2 <- eBayes(fit2)
+dim(fit2)
+summary(fit2)
+sb_age_res <- topTable(fit2, coef = "Age", number = Inf, adjust.method = "BH")
+
+sb_age_res$significant <- ifelse(sb_age_res$adj.P.Val < 0.05, "significant", "not significant")
+volcano_metab <- ggplot(sb_age_res,aes(x = logFC,   y = -log10(adj.P.Val), color = significant)) +
+ geom_point(alpha = 0.65, size = 3) + 
+  theme_pubr(base_size = 20) + geom_vline(xintercept = 0, linetype = 2) + theme(legend.position = "right") +
+  labs(x = "Beta coefficient", y = "-log10(FDR)", title = "untargeted metabolite abundance \n associations (with age)") + theme(plot.title = element_text(hjust = 0.5))
+
+ggsave("volcano_metab.png", volcano_metab, width = 8, height = 6, units = "in", dpi = 320)
+
+report_file_metab_sb <- sb_age_res %>% filter(significant ==  "significant")  %>% as.data.frame()
+#report_file_metab_sb$feature <- rownames(report_file_metab_sb)
+write.csv(report_file_metab_sb, "limma_metab_table_sb_only_age.csv", row.names = F)
+report_file_metab_sb <- read.csv("limma_metab_table_sb_only_age.csv")
+
+#plot heatmap for the top metabolites with age
+# Extract top metabolites
+top_metabs <- report_file_metab_sb %>%
+#  tibble::rownames_to_column("feature") %>%
+  dplyr::arrange(adj.P.Val) %>%
+  dplyr::slice(1:25) %>%
+  dplyr::pull(feature)
+top_metabs <- top_metabs[which(top_metabs %!in% c("Asn His Lys", "Ala Trp Arg Esi+1.0569996" , "> limit Esi-12.231005"))]
+# Extract metabolite rows
+heat <- metabolite_matrix_check_SB[top_metabs, ]
+
+# Order columns (samples) by age
+metadata_ord <- metadata_SB_limma %>% arrange(Age)
+heat         <- heat[, c(colnames(heat) %in% metadata_ord$normalized_name)]
+head(heat)
+# Z-score each metabolite across samples
+heat_scaled <- t(scale(t(heat)))
+
+# Clean display names for heatmap only
+clean_labels <- c("Pregnenolone sulfate",
+"Allylestrenol","Allylestrenol",
+"3Z,6Z,9Z,11Z-Nonadecatetraene",
+"6Z,9Z,12Z-Nonadecatriene",
+"3α,11β,17α-Trihydroxy-5β-pregnan-20-one",
+"1-Hexanol arabinosylglucoside",
+"2,5-Dihydro-2,4-dimethyloxazole",
+"6-Bromoheneicosa-5E,9Z-dienoic acid",
+"3-(8,11,14-Pentadecatrienyl)phenol",
+"Okanin 4-methyl ether caffeoyl-acetylglucoside",
+"17α,2α-Dimethyl-17β-hydroxy-4-androsten-3-one",
+"Glucosylceramide GlcCer(d14:1/24:0(2OH))",
+"5-Oxoavermectin 1b aglycone",
+"Phosphatidylethanolamine PE(19:0/0:0)",
+"Unknown metabolite (C18H30O2)",
+"NKH477", "Monogalactosyldiacylglycerol MGDG(16:0/18:2)",
+"Glucosylceramide GlcCer(d18:1/24:1)",
+"17β-Estradiol 3-sulfate",
+"Plasmenyl phosphatidylglycerol PG(P-20:0/18:1)", 
+"[10]-Paradol")
+clean_labels
+#Replace row names only for visualization
+rownames(heat_scaled) <- clean_labels
+
+#Column annotation (samples)
+annotation_col           <- data.frame(Age = metadata_ord$Age[match(colnames(heat_scaled), metadata_ord$metabol_sample_name)])
+rownames(annotation_col) <- metadata_ord$normalized_name[match(colnames(heat_scaled), metadata_ord$normalized_name)]
+#annotation_col <- annotation_col %>% arrange(Age) %>% as.data.frame()
+dim(annotation_col)
+dim(heat_scaled)
+head(heat_scaled)
+                                 
+ann_colors <- list(Age = colorRampPalette(c("#4575B4", "#FFFFBF", "#D73027"))(100))
+
+#Heatmap
+metab_heatmap <- pheatmap(heat_scaled,
+                          annotation_col = annotation_col, annotation_colors = ann_colors,
+                          cluster_rows = TRUE,
+                          cluster_cols = FALSE,
+                          show_rownames = TRUE,
+                          show_colnames = FALSE,
+                          fontsize_row = 20, fontsize_col = 30, fontsize_number = 30, fontsize = 20,
+                          treeheight_row = 40,
+                          border_color = NA,
+                          color = colorRampPalette((brewer.pal(9, "RdBu")))(100),
+                          labels_row = rownames(heat_scaled), main = "Top 25 FDR-significant metabolites associated with age")
+
+
+jpeg("metab_age_heatmapFig10.png" ,  width = 40, height = 18, units = "in", res = 450)
+metab_heatmap
+dev.off()
+#Run PCA
+pca_res <- prcomp(metab_pareto, center = FALSE, scale. = FALSE)
+pca_df  <- data.frame(normalized_name = rownames(pca_res$x), PC1 = pca_res$x[,1], PC2 = pca_res$x[,2])
+
+pca_df <- left_join(pca_df, metadata, by = "normalized_name")
+
+#Step 7: Check PCA summary
+summary(pca)
+
+#Create PCA scores plot
+library(cowplot)
+
+pca_metabol1 <- pca_scores %>% filter(!is.na(Species)) %>%   ggplot(aes(x = PC1, y = PC2, color = Species)) + geom_point(size = 3) +
+                               theme_pubr(base_size = 24) +
+                               labs(title = " ", x = paste0("PC1 (", round(summary(pca)$importance[2,1]*100,1), "%)"), 
+                                    y = paste0("PC2 (", round(summary(pca)$importance[2,2]*100,1), "%)")) + scale_color_manual(values = pal_npg(), name = NULL)
+
+pca_df %>% filter(!is.na(Species)) %>% ggplot(aes(PC1, PC2, color = Species)) + geom_point(size = 3) +
+                   theme_pubr(base_size = 24) +
+                   stat_ellipse() + labs( title = "Metabolomics", x = paste0("PC1: ", round(summary(pca_res)$importance[2,1] * 100, 1), "%"), 
+                                          y = paste0("PC2: ", round(summary(pca_res)$importance[2,2] * 100, 1), "%")) + scale_color_manual(values = c("yellow3","purple3"), name = NULL)
+
+
+pca_metabol2 <- pca_scores %>% filter(!is.na(Species)) %>%   ggplot(aes(x = PC1, y = PC2, color = Age_Group)) +
+                              geom_point(size = 3) +
+                              theme_pubr(base_size = 24) + labs(title = " ", x = paste0("PC1 (", round(summary(pca)$importance[2,1]*100,1), "%)"),
+                              y = paste0("PC2 (", round(summary(pca)$importance[2,2]*100,1), "%)")) + 
+                              scale_color_manual(values = c("black", "skyblue" , "#009E73","#CC79A7","purple3" ,"gray", "lightgray"), name = NULL) + facet_wrap(.~Species) 
+
+plot_grid(pca_metabol1, pca_metabol2, labels = c("A", "B"), label_size = 24)
+
+rownames(metadata) <- metadata$normalized_name
+#Compute euclidean distance (same as QIIME)
+dist_mat <- dist(metab_pareto, method = "euclidean")
+rownames(dist_mat) == rownames(metadata)
+
+#reorder dist_mat same way as metadata 
+
+# Convert dist object to matrix
+dist_mat_matrix <- as.matrix(dist_mat)
+rownames(dist_mat_matrix)
+# Reorder rows/columns
+dist_mat_matrix_reordered <- dist_mat_matrix[metadata$normalized_name, metadata$normalized_name]
+
+# Convert back to dist object
+dist_mat <- as.dist(dist_mat_matrix_reordered)
+adon_meta <- adonis2(dist_mat ~ Species, data = metadata, permutations = 999, by = "margin") 
+summary(adon_meta)
+adon_meta$R2
+
+disp <- betadisper(dist_mat, metadata$Species)
+anova(disp)
+plot(disp)
+
+# Perform Principal Coordinates Analysis (PCoA)
+pcoa <- cmdscale(dist_mat, k = 2, eig = TRUE)
+# Extract coordinates
+ordination_df <- data.frame(pcoa_res$points) %>%
+  rownames_to_column("SampleID") %>%
+  left_join(metadata, by = c("SampleID" = rownames(metadata)))
+
+# Plot ordination
+ggplot(ordination_df, aes(x = X1, y = X2, color = Group)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(x = "PCoA1", y = "PCoA2", title = "Bray–Curtis PCoA")
+```
+
+
+#Fig 10. GBM - metabolites
+```{r}
+#fix the GBM first
+#do TSS for the func mat pathways
+func_tss <- sweep(func_mat_gbm,1,rowSums(func_mat_gbm),"/")
+#pathway of interest
+pos                <- which(colnames(func_mat_gbm) %in% age_feat)#only picking the ones for age
+pathway_tss <- func_tss[, pos]
+
+pseudo       <- min(pathway_tss[pathway_tss > 0], na.rm = TRUE) / 2
+pathway_log2 <- log2(pathway_tss + pseudo) #rows are samples, and columns are samples
+
+annotations   <- read.csv("old_stuff/sbol_metabolite_list.csv", row.names = 1, check.names = FALSE)
+head(annotations)
+length(which(is.na(annotations$hmdb_id ))) #5180 - are there any ones here related to tryp
+leftover_unannotated <- annotations %>% filter(is.na(hmdb_id)) %>% as.data.frame()
+write.csv(leftover_unannotated, "unannotated_metabolites.csv")
+
+new_gbm_metabolites <- sort(c("HMDB0000042", "HMDB0000929",
+"HMDB0000738", "HMDB0002302", "HMDB0000197",
+"HMDB0000684", "HMDB0000232", "HMDB0000148",
+"HMDB0000112", "HMDB0000211",
+"HMDB0000696", "HMDB0001185", "HMDB0000939", "HMDB0000742",
+"HMDB0000208", "HMDB0000254", "HMDB0000902", "HMDB0001487", "HMDB0001389"))
+
+old_gbm_metabolites_id <- sort(c("HMDB0000065", "HMDB0000132", "HMDB0000155", "HMDB0003424", "HMDB0003576", "HMDB0000148", "HMDB0000112", 
+"HMDB0000208", "HMDB0000254" , "HMDB0000232",  "HMDB0001406",  "HMDB0001400", "HMDB0000902", "HMDB0001487", "HMDB0003555", 
+"HMDB0241844", "HMDB0000211", "HMDB0001037", "HMDB0000929", "HMDB0000738", "HMDB0000197", "HMDB0002302", "HMDB0000259", "HMDB0001389", "HMDB0000684","HMDB0001185","HMDB0000696", "HMDB0000939", "HMDB0000742", "HMDB0000042", "HMDB0001208", "HMDB0000107"))
+
+comp_names               <- annotations$Compound[which(annotations$hmdb_id %in% old_gbm_metabolites_id)] #only 11 found
+gbm_metab_features       <- feature_table[,colnames(feature_table) %in% comp_names][1:128,]
+metab_metadata           <- read.csv("metadata_for_metabolomics.csv", row.names = 1, check.names = FALSE)
+metab_metadata$Age_Group     <- shotgun_metadata$Age_group1[match(metab_metadata$Animal, shotgun_metadata$Animal)]
+metab_metadata$Location_Type <- shotgun_metadata$Location_Type[match(metab_metadata$Animal, shotgun_metadata$Animal)]
+metab_metadata$Location_Type <- shotgun_metadata$Age[match(metab_metadata$Animal, shotgun_metadata$Animal)]
+
+gbm_metab_features$animal    <- metab_metadata$Animal[match(rownames(gbm_metab_features), metab_metadata$normalized_name)]
+gbm_metab_features$sample    <- shotgun_metadata$Sample[match(gbm_metab_features$animal, shotgun_metadata$Animal)]
+gbm_metab_features <- gbm_metab_features %>% filter(!is.na(sample)) %>%  as.data.frame()
+rownames(gbm_metab_features) <- gbm_metab_features$sample
+
+gbm_metab_features <- gbm_metab_features %>% dplyr::select(-animal, -sample) %>% as.data.frame()
+head(gbm_metab_features) #rownames are samples 
+
+head(pathway_log2)
+gbm_metab_features <- gbm_metab_features[match(rownames(pathway_log2),rownames(gbm_metab_features)),]
+
+gbm_metab_features <- gbm_metab_features %>% mutate(across(where(is.character), as.numeric)) %>% as.data.frame()
+
+pathway_df    <- pathway_log2
+metabolite_df <- gbm_metab_features
+head(metab_metadata)
+results <- expand.grid(
+  pathway = colnames(pathway_df),
+  metabolite = colnames(metabolite_df),
+  stringsAsFactors = FALSE
+)
+head(results)
+results$rho <- NA
+results$pval <- NA
+
+for(i in seq_len(nrow(results))) {
+
+  p <- pathway_df[,results$pathway[i]]
+  m <- metabolite_df[,results$metabolite[i]]
+  ct <- cor.test(p, m, method = "spearman", exact = FALSE)
+  results$rho[i] <- unname(ct$estimate)
+  results$pval[i] <- ct$p.value
+}
+
+# FDR correction across all 140 tests
+results$qval <- p.adjust(results$pval, method = "fdr")
+
+results <- results %>%
+  arrange(qval)
+
+results
+
+sig_results <- results %>%
+  filter(qval < 0.05)
+
+sig_results
+library(ggplot2)
+ 
+
+results$label <- ifelse(results$qval < 0.05, "*",  "")
+
+gbm_metab_assoc <- ggplot(results, aes( x = metabolite,y = pathway, fill = rho)) +
+  geom_tile() + geom_text(aes(label = label), size = 10, color = "white") + ylab("gut brain module") + 
+  scale_fill_gradient2(low = "blue", mid = "white",high = "coral",midpoint = 0 ) + theme_pubr(base_size = 24) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme(legend.position = "right")
+gbm_metab_assoc 
+ggsave("Fig11.jpeg", gbm_metab_assoc, width = 24, height = 20, dpi = 450, units = "in") #overall correaltion
+
+#covariate adjusted correlations
+path_res <- residuals(lm(pathway ~ age + sex, data = meta))
+
+met_res <- residuals(lm(metabolite ~ age + sex, data = meta))
+
+cor.test(
+  path_res,
+  met_res,
+  method = "spearman")
+```
+
+
+```{r}
+        
+#Step 1: Residualize all pathways
+class(pathway_df)
+pathway_df <- as.data.frame(pathway_df)
+head(pathway_df)
+#add metadata 
+metab_metadata$samplename <- shotgun_metadata$Sample[match(metab_metadata$Animal, shotgun_metadata$Animal)]
+pathway_df$age            <- metab_metadata$Age[match(rownames(pathway_df), metab_metadata$samplename)]
+pathway_df$sex            <- metab_metadata$Sex[match(rownames(pathway_df), metab_metadata$samplename)]
+pathway_df$species        <- metab_metadata$Species[match(rownames(pathway_df), metab_metadata$samplename)]
+
+pathway_df_complete <- na.omit(pathway_df)
+res_df <- matrix(nrow = nrow(pathway_df_complete), ncol = ncol(pathway_df_complete))
+colnames(res_df) <- colnames(pathway_df_complete)
+rownames(res_df) <- rownames(pathway_df_complete)
+i <- 1
+for(i in 1:ncol(pathway_df_complete)){
+fit <-   lm(pathway_df_complete[,i] ~ species + age + sex, data = pathway_df_complete)
+#Extract residuals and store them safely
+  res_df[, i] <- resid(fit)
+    }
+
+# 3. Convert back to a clean dataframe if needed
+res_df <- as.data.frame(res_df)
+
+#Step 2: Residualize all metabolites
+
+#Step 3: Correlate all residualized pathways against all residualized metabolites
+results <- expand.grid(
+  pathway = colnames(res_df),
+  metabolite = colnames(metabolite_resid),
+  stringsAsFactors = FALSE
+)
+
+results$rho <- NA
+results$pval <- NA
+
+for(i in seq_len(nrow(results))) {
+
+  p <- pathway_resid[[results$pathway[i]]]
+  m <- metabolite_resid[[results$metabolite[i]]]
+
+  ct <- cor.test(
+    p,
+    m,
+    method = "spearman",
+    exact = FALSE
+  )
+
+  results$rho[i] <- unname(ct$estimate)
+  results$pval[i] <- ct$p.value
+}
+
+results$qval <- p.adjust(
+  results$pval,
+  method = "fdr")
+
+results <- results[order(results$qval),]
+
+head(results)
+Significant hits
+sig_results <- subset(results, qval < 0.05)
+
+sig_results
+Scatterplot for a significant pair
+Using the residualized values:
+path <- sig_results$pathway[1]
+met  <- sig_results$metabolite[1]
+
+plot_df <- data.frame(
+  pathway = pathway_resid[[path]],
+  metabolite = metabolite_resid[[met]]
+)
+
+library(ggpubr)
+
+ggscatter(
+  plot_df,
+  x = "pathway",
+  y = "metabolite",
+  add = "reg.line",
+  conf.int = TRUE
+) +
+stat_cor(method = "spearman") +
+labs(
+  x = paste(path, "(age/sex adjusted)"),
+  y = paste(met, "(age/sex adjusted)")
+)
+One additional thought: if your primary pathway models were
+pathway ~ species + age + sex
+and you want pathway–metabolite associations independent of disease group as well, you may want to residualize on:
+~ species + age + sex
+
+```
+
+#Supplementary section figures for BMC Bio
+
+#Fig S1 - taxa barplot (moved this to the supp section for now)
+```{r}
+#Merge all ASVs/OTUs belonging to the same phylum.
+ps_phylum    <- tax_glom(ps_rel, taxrank = "Phylum")
+phylum_table <- otu_table(ps_phylum)
+phylum_table <- as.data.frame(phylum_table)
+
+names(sort(taxa_sums(ps_rel), decreasing = TRUE))
+
+#remove NAs or unknown phylum
+tax_table(ps_phylum)[, "Phylum"][is.na(tax_table(ps_phylum)[, "Phylum"])] <- "Unknown"
+df_phylum <- psmelt(ps_phylum)
+df_phylum <- df_phylum %>% filter(Abundance > 0) %>% as.data.frame() # REMOVE 0s HERE
+
+num_phyla <- df_phylum %>% 
+  group_by(sample.id) %>%
+  dplyr::summarize(total_phyla = length(unique(Phylum))) 
+num_phyla$total_phyla
+
+top_phyla        <- names(sort(tapply(df_phylum$Abundance, df_phylum$Phylum, sum), decreasing = TRUE))[1:10]
+df_phylum$Phylum <- ifelse(df_phylum$Phylum %in% top_phyla,df_phylum$Phylum, "Other")
+
+#Keep only relevant taxonomy columns
+colnames(df_phylum) #clean this up! 
+df_phylum <- df_phylum %>% dplyr::select("sample.id"  ,"Phylum", "Species", "Sex", "Age", "Location_type", "is.neg", "Abundance" ) %>% as.data.frame()
+head(df_phylum)
+
+#renaming species for plots
+df_phylum$Species <- ifelse(df_phylum$Species == "SB", "boliviensis", "sciureus")
+
+df_phyla_top_10 <- df_phylum %>%
+  group_by(Phylum, Species) %>%
+  dplyr::summarize(total_abundance = sum(Abundance)) %>% ungroup() %>% group_by(Species) %>% mutate(all_total = sum(total_abundance)) %>% 
+  mutate(percent = 100 * (total_abundance / all_total)) %>%
+  arrange(desc(percent))
+
+#Do the same for family level plot
+ps_family    <- tax_glom(ps_rel, taxrank = "Family")
+family_table <- otu_table(ps_family)
+family_table <- as.data.frame(family_table)
+
+#remove NAs or unknown phylum
+tax_table(ps_family)[, "Family"][is.na(tax_table(ps_family)[, "Family"])] <- "Unknown"
+df_family <- psmelt(ps_family)
+df_family <- df_family %>% filter(Abundance >0) %>% as.data.frame()
+
+num_family <- df_family %>% 
+  group_by(sample.id) %>%
+  dplyr::summarize(total_family = length(unique(Family))) 
+
+num_family$total_family
+
+top_family <- names(sort(tapply(df_family$Abundance, df_family$Family, sum), decreasing = TRUE))[1:25]
+
+df_family$Family <- ifelse(df_family$Family %in% top_family,df_family$Family, "Other")
+
+#Keep only relevant taxonomy columns
+colnames(df_family) #clean this up! 
+df_family <- df_family %>% dplyr::select("sample.id"  ,"Family", "Species", "Sex", "Age", "Location_type", "is.neg", "Abundance" ) %>% as.data.frame()
+
+df_family$Species <- ifelse(df_family$Species == "SB", "boliviensis", "sciureus")
+
+df_family_top <- df_family %>%
+  group_by(Family, Species) %>%
+  dplyr::summarize(total_abundance = sum(Abundance)) %>% ungroup() %>% group_by(Species) %>% mutate(all_total = sum(total_abundance)) %>% 
+  mutate(percent = 100 * (total_abundance / all_total)) %>%
+  arrange(desc(percent))
+
+#do the same for geneus level too
+ps_genus <- tax_glom(ps_rel, taxrank = "Genus")
+
+tax_table(ps_genus)[, "Genus"][is.na(tax_table(ps_genus)[, "Genus"])] <- "Unknown"
+
+df_genus <- psmelt(ps_genus) %>%
+  filter(Abundance > 0) %>%
+  as.data.frame()
+
+top_genus <- names(sort(tapply(df_genus$Abundance, df_genus$Genus, sum), decreasing = TRUE))[1:25]
+
+df_genus$Genus <- ifelse(df_genus$Genus %in% top_genus, df_genus$Genus, "Other")
+
+df_genus <- df_genus %>%
+  dplyr::select("sample.id","Genus","Species","Sex","Age","Location_type","is.neg","Abundance")
+
+df_genus$Species <- ifelse(df_genus$Species == "SB", "boliviensis", "sciureus")
+sample_order     <- unique(df_phylum$sample.id)
+
+df_phylum$sample.id  <- factor(df_phylum$sample.id, levels = sample_order)
+df_family$sample.id  <- factor(df_family$sample.id, levels = sample_order)
+df_genus$sample.id   <- factor(df_genus$sample.id, levels = sample_order)
+
+#add plot
+##set the theme + plot
+t1 <- theme(                               
+  plot.background = element_blank(), 
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(), 
+  panel.border = element_blank(), 
+  panel.background = element_blank(),
+  axis.line.x = element_blank(),
+  axis.ticks.x = element_blank(),
+  axis.line.y = element_line(size=.4), 
+  legend.position= "right",
+  legend.title = element_blank(),
+  legend.text= element_text(size=14),
+  axis.title.x = element_text(color="black", size=18),
+  axis.title.y = element_text(color="black", size=18),
+  axis.text.y = element_text(color="black", size=18),
+  axis.text.x = element_blank())
+
+#use color palette from https://sashat.me/2017/01/11/list-of-20-simple-distinct-colors/
+phy_cols <- c('#3cb44b', '#ffe119', '#4363d8', '#f58231', '#bfef45', '#911eb4', '#42d4f4', '#f032e6',  '#fabebe', '#469990', "black") #can change this
+
+Figure_S1A <- ggplot(df_phylum, aes(x= sample.id, y = Abundance, fill = Phylum)) + 
+  geom_bar(stat="identity") +
+    scale_fill_manual(values = phy_cols) +
+  ylab("Relative abundance of phylum") +
+  xlab(" ") +  t1 + facet_grid(.~Species, scales = "free_x") + theme(strip.text = element_text(face = "italic", size = 20))
+Figure_S1A
+
+fam_cols <- scales::hue_pal()(length(unique(df_family$Family)))  # #get color palette for top 20 family
+
+Figure_S1B <- ggplot(df_family, aes(x= sample.id, y = Abundance, fill = Family)) + 
+  geom_bar(stat = "identity") +
+    scale_fill_manual(values = fam_cols) +
+  ylab("Relative abundance of family") +
+  xlab(" ") +  t1 + facet_grid(.~Species, scales = "free_x") + theme(strip.text = element_text(face = "italic", size = 20)) 
+Figure_S1B
+
+gen_cols        <- scales::hue_pal()(length(unique(df_genus$Genus)))  # simple palette
+
+Figure_S1C <- ggplot(df_genus, aes(x = sample.id, y = Abundance, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = gen_cols) +
+  ylab("Relative abundance of genus") +
+  xlab("Sample") +
+  t1 + facet_grid(. ~ Species, scales = "free_x") + theme(strip.text = element_text(size = 20))
+
+Figure_S1C
+
+final_Fig1 <- Figure_S1A / Figure_S1B  +
+  plot_layout(nrow = 2, heights = c(1,1)) + plot_annotation(tag_levels = 'A')
+
+final_Fig1 #doesn't look good
+Figure_1B <- df_genus_summ %>% ggplot(aes(x = sample.id, y = Sum_abund, fill=Genus)) + 
+  geom_bar(stat="identity") +
+    scale_fill_manual(values = genus_cols) +
+  ylab("Relative abundance of genus") +
+  xlab("Sample ID") +  facet_grid(.~Species, scales = "free_x") + theme(strip.text = element_text(size = 20)) 
+Figure_1B 
+#save this 
+ggsave("BMC_Bio_FigS1.png", final_Fig1, width = 24, height = 18, units = "in", dpi = 400 )
+
+#t-test 
+wilcox.test(df_genus_summ$Sum_abund[df_genus_summ$genus_cat ==  "Butyrate producers"] ~ df_genus_summ$Species[df_genus_summ$genus_cat ==  "Butyrate producers"] )
+effectsize::rank_biserial(df_genus_summ$Sum_abund[df_genus_summ$genus_cat ==  "Butyrate producers"] ~ df_genus_summ$Species[df_genus_summ$genus_cat ==  "Butyrate producers"])  #sig
+
+#check for t-test 
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$genus_cat ==  "Lactate producers"] ~ df_genus_summ$Species[df_genus_summ$genus_cat ==  "Lactate producers"] ))
+effectsize::rank_biserial(df_genus_summ$Sum_abund[df_genus_summ$genus_cat ==  "Lactate producers"] ~ df_genus_summ$Species[df_genus_summ$genus_cat ==  "Lactate producers"]) #sig
+
+#check for t-test 
+wilcox.test(df_genus_summ$Sum_abund[df_genus_summ$genus_cat ==  "Carbohydrate degraders"] ~ df_genus_summ$Species[df_genus_summ$genus_cat ==  "Carbohydrate degraders"] )
+effectsize::rank_biserial(df_genus_summ$Sum_abund[df_genus_summ$genus_cat ==  "Carbohydrate degraders"] ~ df_genus_summ$Species[df_genus_summ$genus_cat ==  "Carbohydrate degraders"]) #ns
+
+Supp6c.1 <- df_genus_summ %>% filter(genus_cat == "Butyrate producers" & !is.na(Species)) %>% ggplot(aes(x = Species, y = log1p(Sum_abund + 1e-6), color = Species)) + geom_violin() + geom_jitter(size = 3, alpha = 0.62) + theme_pubr(base_size = 24) + scale_color_bmj() + xlab("") + ylab("Relative abundance") +  ggtitle("butyrate producing taxa") + geom_signif(comparisons = list(c("SB", "SC")), map_signif_level = TRUE, color = "black",  test = "wilcox.test", step_increase = 0.1 ) + theme(axis.text.x = element_blank())
+
+Supp6c.2 <- df_genus_summ %>% filter(genus_cat == "Lactate producers" & !is.na(Species)) %>% ggplot(aes(x = Species, y = log1p(Sum_abund + 1e-6), color = Species)) + geom_violin() + geom_jitter(size = 3, alpha = 0.62) + theme_pubr(base_size = 24) + scale_color_bmj() + xlab("") + ylab(" ") +  ggtitle("lactate producing taxa") + geom_signif(comparisons = list(c("SB", "SC")), map_signif_level = TRUE, color = "black",  test = "wilcox.test", step_increase = 0.1 ) + theme(axis.text.x = element_blank())
+
+Supp6c.3 <- df_genus_summ %>% filter(genus_cat == "Carbohydrate degraders" & !is.na(Species)) %>% ggplot(aes(x = Species, y = log1p(Sum_abund + 1e-6), color = Species)) + geom_violin() + geom_jitter(size = 3, alpha = 0.62) + theme_pubr(base_size = 24) + scale_color_bmj() + xlab("") + ylab(" ") +  ggtitle("carbohydrate degrading taxa") + geom_signif(comparisons = list(c("SB", "SC")), map_signif_level = TRUE, color = "black",  test = "wilcox.test", step_increase = 0.1 ) + theme(axis.text.x = element_blank())
+unique(df_genus_summ$Genus)
+
+benefic_microbes_species <- plot_grid(Supp6c.1, Supp6c.2, Supp6c.3, ncol = 3)
+benefic_microbes_species
+ggsave("fig2c_subplot_benefic_microbes_Species.jpeg",benefic_microbes,  height = 6, width= 18, dpi = 350)
+
+
+cor.test(df_genus_summ$Sum_abund[df_genus_summ$Genus == "Faecalibacterium"], df_genus_summ$butyrate[df_genus_summ$Genus == "Faecalibacterium"], method = "spearman")
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$Genus == "Faecalibacterium"] ~ df_genus_summ$Species[df_genus_summ$Genus == "Faecalibacterium"] + df_genus_summ$Age[df_genus_summ$Genus == "Faecalibacterium"])) #ns
+
+df_genus_summ %>% filter(Genus == "Faecalibacterium") %>% ggplot(aes(y = Sum_abund, x = Age, color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm")  + scale_color_bmj() + xlab("Age") + ylab("Rel abundance") + labs(title = "Faecalibacterium") + theme_pubr(base_size = 24) + facet_grid(.~Species) + theme(legend.position = "none")
+
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$Genus == "Agathobaculum"] ~ df_genus_summ$Species[df_genus_summ$Genus == "Agathobaculum"])) #sig
+gen1 <- df_genus_summ %>% filter(Genus == "Agathobaculum" ) %>% ggplot(aes(y = Sum_abund,  x = Age, color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm")  + scale_color_bmj() + xlab("Age") + ylab("Rel abundance") + labs(title = "Agathobaculum") + theme_pubr(base_size = 24) + facet_grid(.~Species)  + theme(legend.position = "none") #significant
+gen1
+
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$Genus == "Prevotella"] ~ df_genus_summ$Species[df_genus_summ$Genus == "Prevotella"])) #ns
+
+gen2 <- df_genus_summ %>% filter(Genus == "Prevotella" ) %>% ggplot(aes(y = Sum_abund, x = Age, color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm")  + scale_color_bmj() + xlab("Age") + ylab("Rel abundance") + labs(title = "Prevotella") + theme_pubr(base_size = 24) + facet_grid(.~Species) + theme(legend.position = "none")
+
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$Genus == "Ruminococcus_B"] ~ df_genus_summ$Species[df_genus_summ$Genus == "Ruminococcus_B"])) #ns
+
+gen3 <- df_genus_summ %>% filter(Genus == "Ruminococcus_B" ) %>% ggplot(aes(y = Sum_abund, x = Age, color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm")  + scale_color_bmj() + xlab("Age") + ylab("Rel abundance") + labs(title = "Ruminococcus_B") + theme_pubr(base_size = 24) + facet_grid(.~Species) + theme(legend.position = "none") #ns
+
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$Genus == "Bifidobacterium_388775"] ~ df_genus_summ$Species[df_genus_summ$Genus == "Bifidobacterium_388775"]))
+
+gen4 <- df_genus_summ %>% filter(Genus == "Bifidobacterium_388775" ) %>% ggplot(aes(y = Sum_abund, x = Age, color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm")  + scale_color_bmj() + xlab("Age") + ylab("Rel abundance ") + labs(title = "Bifidobacterium_388775") + theme_pubr(base_size = 24) + facet_grid(.~Species) + theme(legend.position = "none") #ns
+
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$Genus  %in% c("Blautia_A_141780","Blautia_A_141781")] ~ df_genus_summ$Species[df_genus_summ$Genus  %in% c("Blautia_A_141780","Blautia_A_141781")]))
+
+gen5 <- df_genus_summ %>% filter(Genus %in% c("Blautia_A_141780","Blautia_A_141781" )) %>% ggplot(aes(y = Sum_abund, x = Age, color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm")  + scale_color_bmj() + xlab("Age") + ylab("Rel abundance") +  labs(title = "Blautia_A") + theme_pubr(base_size = 24) + facet_grid(.~Species) + theme(legend.position = "none") #significant
+
+summary(lm(df_genus_summ$Sum_abund[df_genus_summ$Genus  == "Fusicatenibacter"] ~ df_genus_summ$Species[df_genus_summ$Genus  == "Fusicatenibacter"])) #ns
+
+gen6 <- df_genus_summ %>% filter(Genus == "Fusicatenibacter" ) %>% ggplot(aes(y = Sum_abund, x = Age, color = Species)) + geom_point(size = 2, alpha = 0.62) + geom_smooth(method = "lm")  + scale_color_bmj() + xlab("Age") + ylab("Rel abundance") + labs(title = "Fusicatenibacter") + theme_pubr(base_size = 24) + facet_grid(.~Species) + theme(legend.position = "none")
+
+gen1 / gen5
+```
+#Fig S2  - are there any microbial taxa unique to each species
+```{r}
+#Looking for genus level prevalences 
+ps_genus
+range(sample_sums(ps_genus))
+
+# Extract data
+otu  <- as.data.frame(otu_table(ps_genus))
+meta <- data.frame(sample_data(ps_genus))
+
+#Convert to presence/absence
+threshold                   <- 0.001
+otu_pa                      <- otu
+otu_pa[otu_pa < threshold]  <- 0
+otu_pa[otu_pa >= threshold] <- 1
+
+#Calculate prevalence per species
+
+#Split samples by species
+species_list <- split(meta$sample.id, meta$Species)
+
+#Function to calculate prevalence
+calc_prev <- function(samples) {
+  rowMeans(otu_pa[, samples])
+}
+
+prev_bol <- calc_prev(species_list[["SB"]])
+prev_sci <- calc_prev(species_list[["SC"]])
+
+#Identify species-specific taxa
+#Define:
+#* Present in ≥30% of one species
+#* Present in ≤5% of the other
+
+bol_unique <- names(prev_bol[
+  prev_bol >= 0.3 & prev_sci <= 0.05
+])
+
+sci_unique <- names(prev_sci[
+  prev_sci >= 0.3 & prev_bol <= 0.05
+])
+
+
+#Inspect results
+tax_table(ps_genus)[bol_unique, ]
+tax_table(ps_genus)[sci_unique, ]
+
+
+#Visualize (recommended for paper)
+#Prevalence plot
+
+prev_df <- data.frame(
+  Genus = rownames(otu_pa),
+  boliviensis = prev_bol,
+  sciureus = prev_sci)
+
+head(prev_df)
+prev_df %>%
+  arrange(desc(abs(boliviensis - sciureus)))
+
+present_SB <- sum(otu_pa[taxon, species_list[["SB"]]])
+absent_SB  <- length(species_list[["SB"]]) - present_SB
+
+present_SC <- sum(otu_pa[taxon, species_list[["SC"]]])
+absent_SC  <- length(species_list[["SC"]]) - present_SC
+
+fisher.test(matrix(
+  c(present_SB, absent_SB, present_SC,absent_SC),
+  nrow=2))
+
+prev_df$diff <- prev_df$boliviensis - prev_df$sciureus
+
+prev_df %>% filter(diff != 0) %>% ggplot(aes(x = reorder(Genus, abs(diff)),
+           y = diff)) + theme_pubr(base_size = 8) + theme(axis.title.y = element_blank()) +
+  geom_col() + xlab("") + ylab("Differences in prevalence") +
+  coord_flip()
+
+
+fisher.test(
+  matrix(c(
+    present_SB,
+    absent_SB,
+    present_SC,
+    absent_SC
+  ), nrow = 2)
+)
+for (tax in selected) {
+  sb_present <- sum(
+    otu_pa[tax, species_list[["SB"]]]
+  )
+  sc_present <- sum(
+    otu_pa[tax, species_list[["SC"]]]
+  )
+  cat(tax,
+    " SB:", sb_present, "/", length(species_list[["SB"]]),
+    " SC:", sc_present, "/", length(species_list[["SC"]]),
+    "\n"
+  )
+}
+
+taxonomy(ps)
+
+ggplot(prev_df, aes(x= boliviensis, y= sciureus)) +
+  geom_point(alpha=0.5) +
+  geom_abline(slope=1, intercept=0, linetype="dashed") +
+  theme_pubr(base_size = 16) + 
+  xlab("Prevalence (boliviensis)") +
+  ylab("Prevalence (sciureus)")
+
+
+
+#Points far from diagonal = species-biased taxa
+
+#Heatmap of species-specific taxa
+
+library(pheatmap)
+
+selected <- unique(c(bol_unique, sci_unique))
+mat <- otu[selected, ]
+annotation_col <- data.frame(
+  Species = meta$Species
+)
+
+rownames(annotation_col) <- colnames(mat)
+
+pheatmap(
+  mat,
+  scale = "row",
+  annotation_col = annotation_col)
+pheatmap(mat, scale="row")
+
+
+#How to report this (important wording)
+# Avoid: “taxa unique to species”
+# Use: “taxa enriched or prevalent in one species relative to the other”
+
+
+
+#check for ASV level differenes, 
+```
+
+
+#Fig S3 - age group box plots
+```{r}
+
+shotgun_metadata$Age_group1 <- factor(shotgun_metadata$Age_group1, levels = c("Infant", "Yearling", "Juvenile", "Adult", "Geriatric", "Geriatric_old"))
+ 
+shotgun_metadata$Species <- as.factor(shotgun_metadata$Species)
+shotgun_metadata$enclosure <- as.factor(shotgun_metadata$enclosure)
+
+#age plots for 16S shannon - this needs fixing 
+fig2a.1 <- shotgun_metadata %>% ggplot( aes(x = Age_group1, y = otu_shannon, color = Age_group1)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size = 2) + xlab("") + ylab("Shannon diversity \n of ASVs") + theme_pubr(base_size = 24) + 
+  scale_color_manual(values = age_palette, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + facet_grid(.~Species)
+
+fig2a.2 <-  shotgun_metadata %>% ggplot( aes(x = Age_group1, y = otu_simpson, color = Age_group1)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size = 2) + xlab("") + ylab("Simpson diversity \n of functional pathways") +
+  theme_pubr(base_size = 24) + scale_color_manual(values = age_palette, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + facet_grid(.~Species)
+
+fig2a.3 <- shotgun_metadata %>% ggplot( aes(x = Age_group1, y = otu_shannon, color = Age_group1)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size = 2) + xlab("") + ylab("Number of \n functional pathways") +
+  theme_pubr(base_size = 24) + scale_color_manual(values = age_palette, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + facet_grid(.~Species)
+
+blockS1 <- plot_grid(fig2a.1, fig2a.2, fig2a.3, ncol = 3, nrow = 1)
+#getting plots for shotgun div metrics
+
+fig2b.1 <- shotgun_metadata %>% ggplot( aes(x = Age_group1, y = shannon, color = Age_group1)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size = 2) + xlab("") + ylab("Shannon diversity \n of functional pathways") + theme_pubr(base_size = 24) + 
+  scale_color_manual(values = age_palette, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + facet_grid(.~Species)
+
+fig2b.2 <-  shotgun_metadata %>% ggplot( aes(x = Age_group1, y = simpson, color = Age_group1)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size = 2) + xlab("") + ylab("Simpson diversity \n of functional pathways") +
+  theme_pubr(base_size = 24) + scale_color_manual(values = age_palette, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + facet_grid(.~Species)
+
+fig2b.3 <- shotgun_metadata %>% ggplot( aes(x = Age_group1, y = observed_pathways, color = Age_group1)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size = 2) + xlab("") + ylab("Number of \n functional pathways") +
+  theme_pubr(base_size = 24) + scale_color_manual(values = age_palette, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + facet_grid(.~Species)
+
+blockS2 <- plot_grid(fig2b.1, fig2b.2, fig2b.3, ncol = 3, nrow = 1)
+
+
+#this is based on enclosure type
+enclosure_cols <- c("gray", "lightgreen", "forestgreen", "darkgreen")
+shotgun_metadata$enclosure <- factor(shotgun_metadata$enclosure , levels = c("Individual", "Small", "Medium", "Large"))
+
+enc1 <- shotgun_metadata %>% ggplot( aes(x = enclosure, y = otu_shannon, color = enclosure)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size =2) + xlab("") + ylab("Shannon diversity \n (ASVs)") +
+  theme_pubr(base_size = 24) + scale_color_manual(values = enclosure_cols, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + 
+  geom_signif(comparisons = list(c("Large", "Small")), map_signif_level = TRUE, color = "black", test = "wilcox.test", step_increase = 0.1 ) + facet_grid(.~Species)
+
+
+enc2 <- shotgun_metadata %>% ggplot( aes(x = enclosure, y = otu_richness, color = enclosure)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size =2) + xlab("") + ylab("Richness (ASVs)") +
+  theme_pubr(base_size = 24) + scale_color_manual(values = enclosure_cols, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + 
+  geom_signif(comparisons = list(c("Large", "Small")), map_signif_level = TRUE, color = "black", test = "wilcox.test", step_increase = 0.1 ) + facet_grid(.~Species)
+
+
+enc3 <- shotgun_metadata %>% ggplot( aes(x = enclosure, y = shannon, color = enclosure)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size =2) + xlab("") + ylab("Shannon diversity \n (functional pathways)") +
+  theme_pubr(base_size = 24) + scale_color_manual(values = enclosure_cols, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + 
+  geom_signif(comparisons = list(c("Large", "Small")), map_signif_level = TRUE, color = "black", test = "wilcox.test", step_increase = 0.1 ) + facet_grid(.~Species)
+
+
+enc4 <- shotgun_metadata %>% ggplot( aes(x = enclosure, y = observed_pathways, color = enclosure)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size =2) + xlab("") + ylab("Number of observed \n (functional pathways)") +
+  theme_pubr(base_size = 24) + scale_color_manual(values = enclosure_cols, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + 
+  geom_signif(comparisons = list(c("Large", "Small")), map_signif_level = TRUE, color = "black", test = "wilcox.test", step_increase = 0.1 ) + facet_grid(.~Species)
+
+plot_grid(enc1, enc2) 
+plot_grid(enc3, enc4)
+
+shotgun_metadata$Location_Type
+loc_cols <- c("pink", "pink2", "pink4", "brown4")
+
+loc1 <- shotgun_metadata %>% ggplot( aes(x = Location_Type, y = otu_shannon, color = Location_Type)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size =2) + xlab("") + ylab("Shannon diversity \n (ASVs)") +
+  theme_pubr(base_size = 24)  + scale_color_manual(values = loc_cols, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + 
+  geom_signif(comparisons = list(c("Naïve social group", "Experimental group")), map_signif_level = TRUE, color = "black", test = "wilcox.test", step_increase = 0.1 )  + facet_grid(.~Species) 
+
+loc2 <- shotgun_metadata %>% ggplot( aes(x = Location_Type, y = otu_richness, color = Location_Type)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size =2) + xlab("") + ylab("Richness (ASVs)") +
+  theme_pubr(base_size = 24)  + scale_color_manual(values = loc_cols, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank())  + geom_signif(comparisons = list(c("Naïve social group", "Experimental group")), map_signif_level = TRUE, color = "black", test = "wilcox.test", step_increase = 0.1 ) + facet_grid(.~Species) 
+
+
+loc3 <- shotgun_metadata %>% ggplot( aes(x = Location_Type, y = shannon, color = Location_Type)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size =2) + xlab("") + ylab("Shannon diversity \n (functional pathways)") +
+  theme_pubr(base_size = 24)  + scale_color_manual(values = loc_cols, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank())  + geom_signif(comparisons = list(c("Naïve social group", "Experimental group")), map_signif_level = TRUE, color = "black", test = "wilcox.test", step_increase = 0.1 ) + facet_grid(.~Species) 
+
+
+loc4 <- shotgun_metadata %>% ggplot( aes(x = Location_Type, y = observed_pathways, color = Location_Type)) +
+  geom_boxplot() + geom_point(alpha = 0.3, size =2) + xlab("") + ylab("Number of observed \n (functional pathways)") +
+  theme_pubr(base_size = 24)  + scale_color_manual(values = loc_cols, name = NULL) +
+  labs(title = " ") + theme(axis.text.x = element_blank()) + geom_signif(comparisons = list(c("Naïve social group", "Experimental group")), map_signif_level = TRUE, color = "black", test = "wilcox.test", step_increase = 0.1 )   + facet_grid(.~Species) 
+
+
+age_palette <- c("black", "skyblue" , "#009E73","#CC79A7","purple3" ,"gray")
+
+
+nmds_df$Age_Group1 <- shotgun_metadata$Age_group1[match(nmds_df$Animal, shotgun_metadata$Animal)]
+
+nmds_age <- nmds_df %>% filter(!is.na(Species)) %>% ggplot(aes(NMDS1, NMDS2,
+                       color = Age_Group1)) +
+  geom_point(size = 3, alpha = 0.5) +
+  stat_ellipse(level = 0.95, geom = "polygon", alpha = 0.02) +
+  facet_grid(. ~ Species) + theme_pubr(base_size = 24) +labs(title = paste("NMDS (Stress =", round(nmds_res$stress, 3), ")"),
+       x = "NMDS1", y = "NMDS2") + scale_color_manual(values = age_palette,
+                     name = NULL)
+nmds_age
+```
+
+
