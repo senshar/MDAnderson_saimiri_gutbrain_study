@@ -6,18 +6,13 @@ Code and data for squirrel monkey manuscript in prep for BMC Bio.
 3. Sen_et_al_BMC_Bio_MS - scripts for statistical analsyis and producing plots for BMC Bio manuscript
 4. Datasets
  -   4.1. shotgun_metadata.RDS: contains metadata and outcome variables of interest
-   
+
     -  "Sample"
     -  "Location"
     -  "Animal"
-    -  "Name"
     -  "Species"
     -  "Sex"
     -  "Age"
-    -  "Date_Birth"           
-    - "Last_Weight"
-    - "Last_Weight_Date"
-    - "Exemption"
     - "Location_Type"
     - "Age_Group"
     - "Age_group1"
